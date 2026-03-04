@@ -2,45 +2,6 @@ package grid
 
 import "strings"
 
-func RenderPointyHex(cols, rows int) string {
-	hexSpacing := 12
-	halfSpacing := hexSpacing / 2
-
-	bufW := cols*hexSpacing + halfSpacing + 3
-	bufH := rows*4 + 1
-
-	buf := newBuffer(bufW, bufH)
-
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
-			x := halfSpacing + col*hexSpacing
-			y := row * 4
-			stampPointy(buf, x, y)
-		}
-	}
-
-	return buf.String()
-}
-
-func stampPointy(buf *charBuffer, x, y int) {
-	buf.set(x, y, '>')
-	buf.set(x+1, y, '-')
-	buf.set(x+2, y, '<')
-	buf.set(x-2, y+1, '/')
-	buf.set(x+4, y+1, '\\')
-	buf.set(x-6, y+2, '>')
-	buf.set(x-5, y+2, '-')
-	buf.set(x-4, y+2, '<')
-	buf.set(x+6, y+2, '>')
-	buf.set(x+7, y+2, '-')
-	buf.set(x+8, y+2, '<')
-	buf.set(x-2, y+3, '\\')
-	buf.set(x+4, y+3, '/')
-	buf.set(x, y+4, '>')
-	buf.set(x+1, y+4, '-')
-	buf.set(x+2, y+4, '<')
-}
-
 func RenderFlatHex(cols, rows int) string {
 	bufW := cols*10 + 4
 	bufH := rows*6 + 4

@@ -13,14 +13,6 @@ func TestRenderSquare(t *testing.T) {
 	}
 }
 
-func TestRenderPointyHex(t *testing.T) {
-	out := RenderPointyHex(3, 3)
-	fmt.Print(out)
-	if !strings.Contains(out, ">-<") {
-		t.Error("expected hex vertex")
-	}
-}
-
 func TestRenderFlatHex(t *testing.T) {
 	out := RenderFlatHex(4, 3)
 	fmt.Print(out)

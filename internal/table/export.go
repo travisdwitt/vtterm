@@ -14,11 +14,7 @@ func Export(t *Table) (string, error) {
 	case GridTypeGrid:
 		rendered = grid.RenderSquare(t.Width, t.Height)
 	case GridTypeHex:
-		if t.HexOrientation == HexFlatTop {
-			rendered = grid.RenderFlatHex(t.Width, t.Height)
-		} else {
-			rendered = grid.RenderPointyHex(t.Width, t.Height)
-		}
+		rendered = grid.RenderFlatHex(t.Width, t.Height)
 	case GridTypeNone:
 		rendered = "(blank canvas)\n"
 	}

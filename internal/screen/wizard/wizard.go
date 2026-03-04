@@ -133,13 +133,12 @@ func (m Model) updateDimension(message tea.KeyPressMsg, next step) (tea.Model, t
 
 func (m Model) finish() tea.Cmd {
 	t := table.Table{
-		Name:           "Untitled",
-		GridType:       m.gridType,
-		HexOrientation: table.HexFlatTop,
-		Width:          m.width,
-		Height:         m.height,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		Name:      "Untitled",
+		GridType:  m.gridType,
+		Width:     m.width,
+		Height:    m.height,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
 	return func() tea.Msg { return msg.GoToTableView{Table: t} }
 }
@@ -151,7 +150,7 @@ func (m Model) View() tea.View {
 	case stepGridType:
 		s += "Select grid type:\n\n"
 		labels := []string{"Grid", "Hexes", "None"}
-		descs := []string{"Square grid with + and - characters", "Flat-top hexagonal grid", "Blank canvas"}
+		descs := []string{"Square grid", "Hexagonal grid", "Blank canvas"}
 		for i, label := range labels {
 			if m.gridCursor == i {
 				s += styles.Highlight.Render(fmt.Sprintf("> %-8s", label))

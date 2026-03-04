@@ -17,6 +17,8 @@ var (
 
 	Error = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 
+	OverlayStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+
 	CursorStyle = lipgloss.NewStyle().Reverse(true)
 
 	DialogBox = lipgloss.NewStyle().

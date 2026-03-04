@@ -13,6 +13,17 @@ import (
 	"github.com/traviswitt/vtterm/internal/table"
 )
 
+type inputMode int
+
+const (
+	modeNormal   inputMode = iota
+	modeDPending           // received 'd', waiting for 's'
+	modeDrawMenu           // draw menu: l=line, b=box
+	modeDrawLine           // drawing a line
+	modeDrawBox            // drawing a box
+	modeMove               // moving a shape
+)
+
 type Model struct {
 	table     table.Table
 	gridLines []string // raw unstyled lines from renderer
@@ -25,6 +36,20 @@ type Model struct {
 	panX      int // viewport X offset
 	panY      int // viewport Y offset
 	panMode   bool
+
+	mode        inputMode
+	overlay     map[[2]int]rune // committed drawn characters (world coords)
+	pending     map[[2]int]rune // in-progress shape
+	lineStarted bool
+	boxAnchorX  int
+	boxAnchorY  int
+	boxW        int
+	boxH        int
+
+	moving      map[[2]int]rune // characters being moved (at original positions)
+	moveOrigin  map[[2]int]rune // snapshot for cancel/restore
+	moveOffsetX int
+	moveOffsetY int
 }
 
 type clearStatusMsg struct{}
@@ -41,11 +66,7 @@ func (m *Model) renderGrid() {
 	case table.GridTypeGrid:
 		raw = grid.RenderSquare(m.table.Width, m.table.Height)
 	case table.GridTypeHex:
-		if m.table.HexOrientation == table.HexFlatTop {
-			raw = grid.RenderFlatHex(m.table.Width, m.table.Height)
-		} else {
-			raw = grid.RenderPointyHex(m.table.Width, m.table.Height)
-		}
+		raw = grid.RenderFlatHex(m.table.Width, m.table.Height)
 	case table.GridTypeNone:
 		m.gridLines = nil
 		return
@@ -84,7 +105,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showQuit {
 			return m.updateQuitDialog(message)
 		}
-		return m.updateNormal(message)
+		switch m.mode {
+		case modeDPending:
+			return m.updateDPending(message)
+		case modeDrawMenu:
+			return m.updateDrawMenu(message)
+		case modeDrawLine:
+			return m.updateDrawLine(message)
+		case modeDrawBox:
+			return m.updateDrawBox(message)
+		case modeMove:
+			return m.updateMove(message)
+		default:
+			return m.updateNormal(message)
+		}
 	}
 	return m, nil
 }
@@ -103,6 +137,32 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, exportCmd(m.table)
 	case "ctrl+c":
 		return m, tea.Quit
+
+	case "d":
+		if hasGrid {
+			m.mode = modeDPending
+		}
+
+	case "m":
+		if hasGrid {
+			wx := m.cursorX + m.panX
+			wy := m.cursorY + m.panY
+			if _, ok := m.overlay[[2]int{wx, wy}]; ok {
+				m.moving = m.floodSelectOverlay(wx, wy)
+				// Remove selected chars from overlay
+				for k := range m.moving {
+					delete(m.overlay, k)
+				}
+				// Snapshot for cancel
+				m.moveOrigin = make(map[[2]int]rune, len(m.moving))
+				for k, v := range m.moving {
+					m.moveOrigin[k] = v
+				}
+				m.moveOffsetX = 0
+				m.moveOffsetY = 0
+				m.mode = modeMove
+			}
+		}
 
 	case "z":
 		if hasGrid {
@@ -193,6 +253,243 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateDPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if message.String() == "s" {
+		m.mode = modeDrawMenu
+		m.panMode = false
+		return m, nil
+	}
+	m.mode = modeNormal
+	return m.updateNormal(message)
+}
+
+func (m Model) updateDrawMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "l":
+		m.mode = modeDrawLine
+		m.pending = make(map[[2]int]rune)
+		m.lineStarted = false
+	case "b":
+		m.mode = modeDrawBox
+		m.pending = make(map[[2]int]rune)
+		m.boxAnchorX = m.cursorX + m.panX
+		m.boxAnchorY = m.cursorY + m.panY
+		m.boxW = 1
+		m.boxH = 1
+		m.rebuildBoxPending()
+	case "esc":
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+func (m Model) updateDrawLine(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "h", "left":
+		m.depositLineChar(-1, 0)
+		m.clampCursor()
+	case "l", "right":
+		m.depositLineChar(1, 0)
+		m.clampCursor()
+	case "k", "up":
+		m.depositLineChar(0, -1)
+		m.clampCursor()
+	case "j", "down":
+		m.depositLineChar(0, 1)
+		m.clampCursor()
+	case "ctrl+s":
+		m.commitPending()
+		m.mode = modeNormal
+	case "esc":
+		m.pending = nil
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+func (m Model) updateDrawBox(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "l", "right":
+		m.boxW++
+		m.rebuildBoxPending()
+	case "h", "left":
+		if m.boxW > 1 {
+			m.boxW--
+			m.rebuildBoxPending()
+		}
+	case "j", "down":
+		m.boxH++
+		m.rebuildBoxPending()
+	case "k", "up":
+		if m.boxH > 1 {
+			m.boxH--
+			m.rebuildBoxPending()
+		}
+	case "ctrl+s":
+		m.commitPending()
+		m.mode = modeNormal
+	case "esc":
+		m.pending = nil
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+func (m Model) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "h", "left":
+		m.moveOffsetX--
+	case "l", "right":
+		m.moveOffsetX++
+	case "k", "up":
+		m.moveOffsetY--
+	case "j", "down":
+		m.moveOffsetY++
+	case "enter":
+		// Commit: write moved chars into overlay at offset positions
+		if m.overlay == nil {
+			m.overlay = make(map[[2]int]rune)
+		}
+		for k, v := range m.moving {
+			m.overlay[[2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}] = v
+		}
+		m.moving = nil
+		m.moveOrigin = nil
+		m.mode = modeNormal
+	case "esc":
+		// Cancel: restore original positions
+		if m.overlay == nil {
+			m.overlay = make(map[[2]int]rune)
+		}
+		for k, v := range m.moveOrigin {
+			m.overlay[k] = v
+		}
+		m.moving = nil
+		m.moveOrigin = nil
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+func (m *Model) floodSelectOverlay(startX, startY int) map[[2]int]rune {
+	result := make(map[[2]int]rune)
+	queue := [][2]int{{startX, startY}}
+	visited := make(map[[2]int]bool)
+
+	for len(queue) > 0 {
+		pos := queue[0]
+		queue = queue[1:]
+		if visited[pos] {
+			continue
+		}
+		visited[pos] = true
+
+		r, ok := m.overlay[pos]
+		if !ok {
+			continue
+		}
+		result[pos] = r
+
+		// 4-directional neighbors
+		for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+			next := [2]int{pos[0] + d[0], pos[1] + d[1]}
+			if !visited[next] {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return result
+}
+
+func (m *Model) depositLineChar(dx, dy int) {
+	maxX := m.width - 1
+	if maxX < 0 {
+		maxX = 0
+	}
+	maxY := m.height - 2
+	if maxY < 0 {
+		maxY = 0
+	}
+
+	newSX := m.cursorX + dx
+	newSY := m.cursorY + dy
+	if newSX < 0 || newSX > maxX || newSY < 0 || newSY > maxY {
+		return // would be clamped, skip
+	}
+
+	wx := m.cursorX + m.panX
+	wy := m.cursorY + m.panY
+
+	var ch rune
+	if dx != 0 {
+		ch = '-'
+	} else {
+		ch = '|'
+	}
+
+	if !m.lineStarted {
+		m.pending[[2]int{wx, wy}] = ch
+		m.lineStarted = true
+	}
+
+	// Upgrade previous position to corner if direction changed
+	prev, hasPrev := m.pending[[2]int{wx, wy}]
+	if hasPrev {
+		if (prev == '-' && dy != 0) || (prev == '|' && dx != 0) {
+			m.pending[[2]int{wx, wy}] = '+'
+		}
+	}
+
+	newWX := wx + dx
+	newWY := wy + dy
+
+	// Check intersection with existing characters
+	existing, hasExisting := m.pending[[2]int{newWX, newWY}]
+	if !hasExisting {
+		existing, hasExisting = m.overlay[[2]int{newWX, newWY}]
+	}
+	if hasExisting && ((existing == '-' && dy != 0) || (existing == '|' && dx != 0) || existing == '+') {
+		ch = '+'
+	}
+
+	m.pending[[2]int{newWX, newWY}] = ch
+
+	m.cursorX = newSX
+	m.cursorY = newSY
+}
+
+func (m *Model) rebuildBoxPending() {
+	m.pending = make(map[[2]int]rune)
+	ax, ay := m.boxAnchorX, m.boxAnchorY
+	w, h := m.boxW, m.boxH
+
+	// Draw edges
+	for x := range w {
+		m.pending[[2]int{ax + x, ay}] = '-'         // top
+		m.pending[[2]int{ax + x, ay + h - 1}] = '-' // bottom
+	}
+	for y := range h {
+		m.pending[[2]int{ax, ay + y}] = '|'         // left
+		m.pending[[2]int{ax + w - 1, ay + y}] = '|' // right
+	}
+
+	// Corners (written last to overwrite edges)
+	m.pending[[2]int{ax, ay}] = '+'
+	m.pending[[2]int{ax + w - 1, ay}] = '+'
+	m.pending[[2]int{ax, ay + h - 1}] = '+'
+	m.pending[[2]int{ax + w - 1, ay + h - 1}] = '+'
+}
+
+func (m *Model) commitPending() {
+	if m.overlay == nil {
+		m.overlay = make(map[[2]int]rune)
+	}
+	for k, v := range m.pending {
+		m.overlay[k] = v
+	}
+	m.pending = nil
+}
+
 func (m *Model) clampCursor() {
 	maxX := m.width - 1
 	if maxX < 0 {
@@ -217,25 +514,25 @@ func (m *Model) clampCursor() {
 }
 
 func (m *Model) centerFunc() grid.CenterFunc {
-	switch {
-	case m.table.GridType == table.GridTypeGrid:
+	switch m.table.GridType {
+	case table.GridTypeGrid:
 		return grid.SquareCellCenter
-	case m.table.GridType == table.GridTypeHex && m.table.HexOrientation == table.HexFlatTop:
+	case table.GridTypeHex:
 		return grid.FlatHexCellCenter
 	default:
-		return grid.PointyHexCellCenter
+		return grid.FlatHexCellCenter
 	}
 }
 
 func (m *Model) detectCell(wx, wy int) (col, row int, ok bool) {
 	cols, rows := m.table.Width, m.table.Height
-	switch {
-	case m.table.GridType == table.GridTypeGrid:
+	switch m.table.GridType {
+	case table.GridTypeGrid:
 		return grid.DetectSquareCell(wx, wy, cols, rows)
-	case m.table.GridType == table.GridTypeHex && m.table.HexOrientation == table.HexFlatTop:
+	case table.GridTypeHex:
 		return grid.DetectFlatHexCell(wx, wy, cols, rows)
 	default:
-		return grid.DetectPointyHexCell(wx, wy, cols, rows)
+		return grid.DetectFlatHexCell(wx, wy, cols, rows)
 	}
 }
 
@@ -370,28 +667,17 @@ func (m Model) renderViewport(vpW, vpH int) string {
 	var sb strings.Builder
 	for sy := range vpH {
 		wy := sy + m.panY
-		line := m.worldLine(wy, vpW)
+		runes, isOverlay := m.worldLine(wy, vpW)
 
-		if sy == m.cursorY {
-			// Split line into pre-cursor, cursor char, post-cursor.
-			cx := m.cursorX
-			if cx < 0 {
-				cx = 0
+		for i, r := range runes {
+			ch := string(r)
+			if sy == m.cursorY && i == m.cursorX {
+				sb.WriteString(styles.CursorStyle.Render(ch))
+			} else if isOverlay[i] {
+				sb.WriteString(styles.OverlayStyle.Render(ch))
+			} else {
+				sb.WriteString(styles.GridStyle.Render(ch))
 			}
-			if cx >= vpW {
-				cx = vpW - 1
-			}
-
-			runes := []rune(line)
-			pre := string(runes[:cx])
-			ch := string(runes[cx : cx+1])
-			post := string(runes[cx+1:])
-
-			sb.WriteString(styles.GridStyle.Render(pre))
-			sb.WriteString(styles.CursorStyle.Render(ch))
-			sb.WriteString(styles.GridStyle.Render(post))
-		} else {
-			sb.WriteString(styles.GridStyle.Render(line))
 		}
 
 		if sy < vpH-1 {
@@ -402,23 +688,46 @@ func (m Model) renderViewport(vpW, vpH int) string {
 }
 
 // worldLine extracts a horizontal slice of width w from gridLines at world row wy,
-// starting at panX offset. Pads with spaces if outside grid bounds.
-func (m Model) worldLine(wy, w int) string {
-	if wy < 0 || wy >= len(m.gridLines) {
-		return strings.Repeat(" ", w)
+// starting at panX offset. Returns runes and a parallel bool slice indicating which
+// positions are overlay characters (pending, moving, or committed overlay).
+func (m Model) worldLine(wy, w int) ([]rune, []bool) {
+	var gridRunes []rune
+	if wy >= 0 && wy < len(m.gridLines) {
+		gridRunes = []rune(m.gridLines[wy])
 	}
-	src := m.gridLines[wy]
-	runes := []rune(src)
 	result := make([]rune, w)
+	overlay := make([]bool, w)
 	for i := range w {
 		wx := i + m.panX
-		if wx >= 0 && wx < len(runes) {
-			result[i] = runes[wx]
+		coord := [2]int{wx, wy}
+
+		if r, ok := m.pending[coord]; ok {
+			result[i] = r
+			overlay[i] = true
+		} else if m.moving != nil {
+			// Check if a moving char lands here after offset
+			origCoord := [2]int{wx - m.moveOffsetX, wy - m.moveOffsetY}
+			if r, ok := m.moving[origCoord]; ok {
+				result[i] = r
+				overlay[i] = true
+			} else if r, ok := m.overlay[coord]; ok {
+				result[i] = r
+				overlay[i] = true
+			} else if wx >= 0 && wx < len(gridRunes) {
+				result[i] = gridRunes[wx]
+			} else {
+				result[i] = ' '
+			}
+		} else if r, ok := m.overlay[coord]; ok {
+			result[i] = r
+			overlay[i] = true
+		} else if wx >= 0 && wx < len(gridRunes) {
+			result[i] = gridRunes[wx]
 		} else {
 			result[i] = ' '
 		}
 	}
-	return string(result)
+	return result, overlay
 }
 
 func (m Model) topBar() string {
@@ -434,6 +743,18 @@ func (m Model) topBar() string {
 		if m.panMode {
 			left += "  " + styles.Highlight.Render("PAN")
 		}
+		switch m.mode {
+		case modeDPending:
+			left += "  " + styles.Highlight.Render("d-")
+		case modeDrawMenu:
+			left += "  " + styles.Highlight.Render("DRAW: l=line b=box")
+		case modeDrawLine:
+			left += "  " + styles.Highlight.Render("LINE")
+		case modeDrawBox:
+			left += "  " + styles.Highlight.Render(fmt.Sprintf("BOX %dx%d", m.boxW, m.boxH))
+		case modeMove:
+			left += "  " + styles.Highlight.Render("MOVE")
+		}
 	}
 	if m.statusMsg != "" {
 		if left != "" {
@@ -442,7 +763,21 @@ func (m Model) topBar() string {
 		left += m.statusMsg
 	}
 
-	right := styles.Subtle.Render("hjkl: move  tab: next cell  z: pan  q: quit  s: save  S: export")
+	var right string
+	switch m.mode {
+	case modeDPending:
+		right = styles.Subtle.Render("s: draw shape")
+	case modeDrawMenu:
+		right = styles.Subtle.Render("l: line  b: box  esc: cancel")
+	case modeDrawLine:
+		right = styles.Subtle.Render("hjkl: draw  ctrl+s: commit  esc: cancel")
+	case modeDrawBox:
+		right = styles.Subtle.Render("hjkl: resize  ctrl+s: commit  esc: cancel")
+	case modeMove:
+		right = styles.Subtle.Render("hjkl: move  enter: place  esc: cancel")
+	default:
+		right = styles.Subtle.Render("hjkl: move  tab: next cell  z: pan  d: draw  q: quit  s: save  S: export")
+	}
 
 	leftWidth := lipgloss.Width(left)
 	rightWidth := lipgloss.Width(right)
