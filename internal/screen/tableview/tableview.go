@@ -83,8 +83,9 @@ type Model struct {
 
 	mode         inputMode
 	prevMode     inputMode                // mode to return to from modeLayer/modeMPending
-	layers       map[int]map[[2]int]rune  // layer index → overlay map
-	currentLayer int                      // active layer (default 0)
+	layers       map[int]map[[2]int]rune   // layer index → overlay map
+	layerColors  map[int]map[[2]int]string // layer index → per-char color
+	currentLayer int                       // active layer (default 0)
 	pending      map[[2]int]rune          // in-progress shape
 	lineStarted  bool
 	boxAnchorX   int
@@ -98,19 +99,23 @@ type Model struct {
 	textCurRow  int      // cursor row in textLines
 	textCurCol  int      // cursor col in textLines
 
-	moving          map[[2]int]rune // characters being moved (at original positions)
-	moveOrigin      map[[2]int]rune // snapshot for cancel/restore
-	moveOffsetX     int
-	moveOffsetY     int
-	moveSourceLayer int // layer the shape was picked from (for esc cancel)
+	moving           map[[2]int]rune   // characters being moved (at original positions)
+	movingColors     map[[2]int]string // colors of characters being moved
+	moveOriginColors map[[2]int]string // snapshot of colors for cancel/restore
+	moveOrigin       map[[2]int]rune   // snapshot for cancel/restore
+	moveOffsetX      int
+	moveOffsetY      int
+	moveSourceLayer  int // layer the shape was picked from (for esc cancel)
 
 	nameInput textinput.Model
 
 	// Token menu
-	tokenMenuCursor int
-	tokenMenuItems  []tokenMenuItem
-	tokenCreateMode bool
-	tokenFolderMode bool
+	tokenMenuCursor      int
+	tokenMenuItems       []tokenMenuItem
+	tokenCreateMode      bool
+	tokenFolderMode      bool
+	tokenConfirmDelete   bool
+	expandedFolders     map[string]bool
 
 	// Token editing
 	tokenEditIdx    int      // index into table.TokenDefs
@@ -132,9 +137,10 @@ type Model struct {
 	// Token delete confirmation
 	deleteTokenIdx int // index into TokenPlacements, -1 = hidden
 
-	// Token color picker
-	colorTokenIdx int // index into TokenPlacements, -1 = hidden
-	colorCursor   int
+	// Color picker (shared between tokens and overlay)
+	colorTokenIdx          int       // index into TokenPlacements, -1 = hidden
+	colorOverlayPositions  [][2]int  // overlay positions to color (nil = not coloring overlay)
+	colorCursor            int
 
 	// Shared text input for token name/folder entry
 	tokenNameInput textinput.Model
@@ -145,10 +151,12 @@ type clearStatusMsg struct{}
 func New(t table.Table, lib *table.TokenLibrary, w, h int) Model {
 	m := Model{table: t, tokenLib: lib, width: w, height: h}
 	m.layers = make(map[int]map[[2]int]rune)
+	m.layerColors = make(map[int]map[[2]int]string)
 	m.movingTokenIdx = -1
 	m.inspectTokenIdx = -1
 	m.deleteTokenIdx = -1
 	m.colorTokenIdx = -1
+	m.expandedFolders = make(map[string]bool)
 	m.renderGrid()
 	m.loadOverlayFromTable()
 	return m
@@ -174,8 +182,13 @@ func (m *Model) syncOverlayToTable() {
 	}
 	chars := make([]table.OverlayChar, 0, total)
 	for layer, ol := range m.layers {
+		lc := m.layerColors[layer]
 		for k, v := range ol {
-			chars = append(chars, table.OverlayChar{X: k[0], Y: k[1], R: string(v), Layer: layer})
+			oc := table.OverlayChar{X: k[0], Y: k[1], R: string(v), Layer: layer}
+			if lc != nil {
+				oc.Color = lc[k]
+			}
+			chars = append(chars, oc)
 		}
 	}
 	m.table.Overlay = chars
@@ -195,7 +208,16 @@ func (m *Model) loadOverlayFromTable() {
 			ol = make(map[[2]int]rune)
 			m.layers[oc.Layer] = ol
 		}
-		ol[[2]int{oc.X, oc.Y}] = runes[0]
+		pos := [2]int{oc.X, oc.Y}
+		ol[pos] = runes[0]
+		if oc.Color != "" {
+			lc, ok := m.layerColors[oc.Layer]
+			if !ok {
+				lc = make(map[[2]int]string)
+				m.layerColors[oc.Layer] = lc
+			}
+			lc[pos] = oc.Color
+		}
 	}
 }
 
@@ -466,17 +488,37 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			pi := m.findTokenPlacementAt(wx, wy)
 			if pi >= 0 {
 				m.colorTokenIdx = pi
+				m.colorOverlayPositions = nil
 				m.colorCursor = 0
-				// Pre-select the token's current color
-				if def := m.tokenLib.FindTokenDef(m.table.TokenPlacements[pi].TokenID); def != nil && def.Color != "" {
+				// Pre-select the placement's current color
+				if c := m.table.TokenPlacements[pi].Color; c != "" {
 					for i, tc := range tokenColors {
-						if tc.color == def.Color {
+						if tc.color == c {
 							m.colorCursor = i
 							break
 						}
 					}
 				}
 				m.mode = modeTokenColor
+			} else if ol := m.layers[m.currentLayer]; ol != nil {
+				if _, ok := ol[[2]int{wx, wy}]; ok {
+					positions := m.floodSelectOverlayPositions(wx, wy)
+					m.colorTokenIdx = -1
+					m.colorOverlayPositions = positions
+					m.colorCursor = 0
+					// Pre-select the overlay's current color
+					if lc := m.layerColors[m.currentLayer]; lc != nil {
+						if c, ok := lc[[2]int{wx, wy}]; ok {
+							for i, tc := range tokenColors {
+								if tc.color == c {
+									m.colorCursor = i
+									break
+								}
+							}
+						}
+					}
+					m.mode = modeTokenColor
+				}
 			}
 		}
 
@@ -538,12 +580,25 @@ func (m Model) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				ol := m.activeOverlay()
 				if _, ok := ol[[2]int{wx, wy}]; ok {
 					m.moving = m.floodSelectOverlay(wx, wy)
+					// Grab colors for the moving chars
+					lc := m.layerColors[m.currentLayer]
+					m.movingColors = make(map[[2]int]string, len(m.moving))
 					for k := range m.moving {
 						delete(ol, k)
+						if lc != nil {
+							if c, ok := lc[k]; ok {
+								m.movingColors[k] = c
+								delete(lc, k)
+							}
+						}
 					}
 					m.moveOrigin = make(map[[2]int]rune, len(m.moving))
+					m.moveOriginColors = make(map[[2]int]string, len(m.movingColors))
 					for k, v := range m.moving {
 						m.moveOrigin[k] = v
+					}
+					for k, v := range m.movingColors {
+						m.moveOriginColors[k] = v
 					}
 					m.moveOffsetX = 0
 					m.moveOffsetY = 0
@@ -603,11 +658,22 @@ func (m Model) updateLayer(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.mode = modeNormal
 			} else {
 				ol := m.activeOverlay()
+				lc, ok := m.layerColors[m.currentLayer]
+				if !ok {
+					lc = make(map[[2]int]string)
+					m.layerColors[m.currentLayer] = lc
+				}
 				for k, v := range m.moving {
-					ol[[2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}] = v
+					newPos := [2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}
+					ol[newPos] = v
+					if c, ok := m.movingColors[k]; ok {
+						lc[newPos] = c
+					}
 				}
 				m.moving = nil
+				m.movingColors = nil
 				m.moveOrigin = nil
+				m.moveOriginColors = nil
 				m.mode = modeNormal
 			}
 		} else {
@@ -813,11 +879,22 @@ func (m Model) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeMPending
 	case "enter":
 		ol := m.activeOverlay()
+		lc, ok := m.layerColors[m.currentLayer]
+		if !ok {
+			lc = make(map[[2]int]string)
+			m.layerColors[m.currentLayer] = lc
+		}
 		for k, v := range m.moving {
-			ol[[2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}] = v
+			newPos := [2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}
+			ol[newPos] = v
+			if c, ok := m.movingColors[k]; ok {
+				lc[newPos] = c
+			}
 		}
 		m.moving = nil
+		m.movingColors = nil
 		m.moveOrigin = nil
+		m.moveOriginColors = nil
 		m.mode = modeNormal
 	case "esc":
 		srcOl, ok := m.layers[m.moveSourceLayer]
@@ -828,8 +905,20 @@ func (m Model) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		for k, v := range m.moveOrigin {
 			srcOl[k] = v
 		}
+		if len(m.moveOriginColors) > 0 {
+			srcLc, ok := m.layerColors[m.moveSourceLayer]
+			if !ok {
+				srcLc = make(map[[2]int]string)
+				m.layerColors[m.moveSourceLayer] = srcLc
+			}
+			for k, v := range m.moveOriginColors {
+				srcLc[k] = v
+			}
+		}
 		m.moving = nil
+		m.movingColors = nil
 		m.moveOrigin = nil
+		m.moveOriginColors = nil
 		m.mode = modeNormal
 	}
 	return m, nil
@@ -862,6 +951,39 @@ func (m Model) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 	}
 	return m, nil
+}
+
+// floodSelectOverlayPositions returns positions of all overlay chars connected to (startX, startY).
+func (m Model) floodSelectOverlayPositions(startX, startY int) [][2]int {
+	ol := m.layers[m.currentLayer]
+	if ol == nil {
+		return nil
+	}
+	var result [][2]int
+	queue := [][2]int{{startX, startY}}
+	visited := make(map[[2]int]bool)
+
+	for len(queue) > 0 {
+		pos := queue[0]
+		queue = queue[1:]
+		if visited[pos] {
+			continue
+		}
+		visited[pos] = true
+
+		if _, ok := ol[pos]; !ok {
+			continue
+		}
+		result = append(result, pos)
+
+		for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+			next := [2]int{pos[0] + d[0], pos[1] + d[1]}
+			if !visited[next] {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return result
 }
 
 func (m *Model) floodSelectOverlay(startX, startY int) map[[2]int]rune {
@@ -1193,7 +1315,7 @@ func (m Model) renderViewport(vpW, vpH int) string {
 	var sb strings.Builder
 	for sy := range vpH {
 		wy := sy + m.panY
-		runes, isOverlay, tokenColor := m.worldLine(wy, vpW)
+		runes, overlayColor, tokenColor := m.worldLine(wy, vpW)
 
 		for i, r := range runes {
 			ch := string(r)
@@ -1203,8 +1325,8 @@ func (m Model) renderViewport(vpW, vpH int) string {
 				sb.WriteString(styles.TokenDisabledStyle.Render(ch))
 			} else if tokenColor[i] != "" {
 				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(tokenColor[i])).Render(ch))
-			} else if isOverlay[i] {
-				sb.WriteString(styles.OverlayStyle.Render(ch))
+			} else if overlayColor[i] != "" {
+				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(overlayColor[i])).Render(ch))
 			} else {
 				sb.WriteString(styles.GridStyle.Render(ch))
 			}
@@ -1218,15 +1340,16 @@ func (m Model) renderViewport(vpW, vpH int) string {
 }
 
 // worldLine extracts a horizontal slice of width w from gridLines at world row wy,
-// starting at panX offset. Returns runes, overlay flags, and per-position token color
-// ("" = not a token, "disabled" = gray, otherwise ANSI color number).
-func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
+// starting at panX offset. Returns runes, per-position overlay color ("" = not overlay,
+// else ANSI color), and per-position token color ("" = not a token, "disabled" = gray,
+// otherwise ANSI color number).
+func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 	var gridRunes []rune
 	if wy >= 0 && wy < len(m.gridLines) {
 		gridRunes = []rune(m.gridLines[wy])
 	}
 	result := make([]rune, w)
-	isOverlay := make([]bool, w)
+	overlayColor := make([]string, w)
 	tokenColor := make([]string, w)
 
 	// Base: grid
@@ -1240,12 +1363,23 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 	}
 
 	// Show only the current layer
-	if ol, ok := m.layers[m.currentLayer]; ok {
+	ol := m.layers[m.currentLayer]
+	lc := m.layerColors[m.currentLayer]
+	if ol != nil {
 		for i := range w {
 			wx := i + m.panX
-			if r, ok := ol[[2]int{wx, wy}]; ok {
+			pos := [2]int{wx, wy}
+			if r, ok := ol[pos]; ok {
 				result[i] = r
-				isOverlay[i] = true
+				if lc != nil {
+					if c, ok := lc[pos]; ok {
+						overlayColor[i] = c
+					} else {
+						overlayColor[i] = "255"
+					}
+				} else {
+					overlayColor[i] = "255"
+				}
 			}
 		}
 	}
@@ -1258,14 +1392,14 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 		if pi == m.movingTokenIdx {
 			continue
 		}
-		tc := m.resolveTokenColor(p.TokenID)
+		tc := m.resolveTokenColor(p)
 		box := m.tokenBoxRunes(p)
 		for coord, r := range box {
 			sx := coord[0] - m.panX
 			if sx >= 0 && sx < w && coord[1] == wy {
 				result[sx] = r
 				tokenColor[sx] = tc
-				isOverlay[sx] = false
+				overlayColor[sx] = ""
 			}
 		}
 	}
@@ -1273,7 +1407,7 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 	// Moving token at offset position
 	if m.movingTokenIdx >= 0 && m.movingTokenIdx < len(m.table.TokenPlacements) {
 		p := m.table.TokenPlacements[m.movingTokenIdx]
-		tc := m.resolveTokenColor(p.TokenID)
+		tc := m.resolveTokenColor(p)
 		movedP := table.TokenPlacement{
 			TokenID: p.TokenID,
 			X:       m.tokenMoveOriginX + m.tokenMoveOffsetX,
@@ -1287,7 +1421,7 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 			if sx >= 0 && sx < w && coord[1] == wy {
 				result[sx] = r
 				tokenColor[sx] = tc
-				isOverlay[sx] = false
+				overlayColor[sx] = ""
 			}
 		}
 	}
@@ -1309,7 +1443,7 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 					if sx >= 0 && sx < w {
 						result[sx] = r
 						tokenColor[sx] = "214" // tooltip always orange
-						isOverlay[sx] = false
+						overlayColor[sx] = ""
 					}
 				}
 			}
@@ -1323,7 +1457,11 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 			origCoord := [2]int{wx - m.moveOffsetX, wy - m.moveOffsetY}
 			if r, ok := m.moving[origCoord]; ok {
 				result[i] = r
-				isOverlay[i] = true
+				if c, ok := m.movingColors[origCoord]; ok {
+					overlayColor[i] = c
+				} else {
+					overlayColor[i] = "255"
+				}
 				tokenColor[i] = ""
 			}
 		}
@@ -1334,12 +1472,12 @@ func (m Model) worldLine(wy, w int) ([]rune, []bool, []string) {
 		wx := i + m.panX
 		if r, ok := m.pending[[2]int{wx, wy}]; ok {
 			result[i] = r
-			isOverlay[i] = true
+			overlayColor[i] = "255"
 			tokenColor[i] = ""
 		}
 	}
 
-	return result, isOverlay, tokenColor
+	return result, overlayColor, tokenColor
 }
 
 func (m Model) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
@@ -1528,18 +1666,15 @@ func (m Model) viewDeleteTokenDialog() string {
 
 // --- Token helpers ---
 
-// resolveTokenColor returns the effective color string for a token:
-// "disabled" if the def is disabled, the def's Color if set, or "214" (default orange).
-func (m Model) resolveTokenColor(tokenID string) string {
-	def := m.tokenLib.FindTokenDef(tokenID)
-	if def == nil {
-		return "214"
-	}
-	if def.IsDisabled() {
+// resolveTokenColor returns the effective color string for a token placement:
+// "disabled" if the def is disabled, the placement's Color if set, or "214" (default orange).
+func (m Model) resolveTokenColor(p table.TokenPlacement) string {
+	def := m.tokenLib.FindTokenDef(p.TokenID)
+	if def != nil && def.IsDisabled() {
 		return "disabled"
 	}
-	if def.Color != "" {
-		return def.Color
+	if p.Color != "" {
+		return p.Color
 	}
 	return "214"
 }
@@ -1570,9 +1705,11 @@ func (m *Model) rebuildTokenMenu() {
 	sort.Strings(folders)
 	for _, f := range folders {
 		m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmFolder, folder: f})
-		for i, td := range m.tokenLib.Defs {
-			if td.Folder == f {
-				m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmToken, folder: f, tokenIdx: i})
+		if m.expandedFolders[f] {
+			for i, td := range m.tokenLib.Defs {
+				if td.Folder == f {
+					m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmToken, folder: f, tokenIdx: i})
+				}
 			}
 		}
 	}
@@ -1617,10 +1754,8 @@ func (m *Model) beginTokenEdit(defIdx int) {
 	for _, prop := range td.Properties {
 		m.tokenEditLines = append(m.tokenEditLines, []rune(prop.Key+": "+prop.Value))
 	}
-	if len(m.tokenEditLines) == 0 {
-		m.tokenEditLines = [][]rune{{}}
-	}
-	m.tokenEditCurRow = 0
+	m.tokenEditLines = append(m.tokenEditLines, []rune{})
+	m.tokenEditCurRow = len(m.tokenEditLines) - 1
 	m.tokenEditCurCol = 0
 }
 
@@ -1640,6 +1775,30 @@ func (m *Model) commitTokenEdit() {
 // --- Token menu update ---
 
 func (m Model) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.tokenConfirmDelete {
+		switch message.String() {
+		case "y", "enter":
+			if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+				item := m.tokenMenuItems[m.tokenMenuCursor]
+				if item.kind == tmToken {
+					m.deleteToken(item.tokenIdx)
+				} else if item.kind == tmFolder {
+					m.deleteFolder(item.folder)
+				}
+				m.rebuildTokenMenu()
+				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
+					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
+				}
+				if m.tokenMenuCursor < 0 {
+					m.tokenMenuCursor = 0
+				}
+			}
+			m.tokenConfirmDelete = false
+		case "n", "esc":
+			m.tokenConfirmDelete = false
+		}
+		return m, nil
+	}
 	if m.tokenCreateMode || m.tokenFolderMode {
 		return m.updateTokenMenuInput(message)
 	}
@@ -1655,7 +1814,13 @@ func (m Model) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
 			item := m.tokenMenuItems[m.tokenMenuCursor]
-			if item.kind == tmToken {
+			if item.kind == tmFolder {
+				m.expandedFolders[item.folder] = !m.expandedFolders[item.folder]
+				m.rebuildTokenMenu()
+				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
+					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
+				}
+			} else if item.kind == tmToken {
 				td := m.tokenLib.Defs[item.tokenIdx]
 				wx := m.cursorX + m.panX
 				wy := m.cursorY + m.panY
@@ -1692,19 +1857,7 @@ func (m Model) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-			item := m.tokenMenuItems[m.tokenMenuCursor]
-			if item.kind == tmToken {
-				m.deleteToken(item.tokenIdx)
-			} else if item.kind == tmFolder {
-				m.deleteFolder(item.folder)
-			}
-			m.rebuildTokenMenu()
-			if m.tokenMenuCursor >= len(m.tokenMenuItems) {
-				m.tokenMenuCursor = len(m.tokenMenuItems) - 1
-			}
-			if m.tokenMenuCursor < 0 {
-				m.tokenMenuCursor = 0
-			}
+			m.tokenConfirmDelete = true
 		}
 	case "esc":
 		m.mode = modeNormal
@@ -1864,16 +2017,24 @@ func (m Model) updateTokenColor(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.colorCursor--
 		}
 	case "enter":
-		if m.colorTokenIdx >= 0 && m.colorTokenIdx < len(m.table.TokenPlacements) {
-			p := m.table.TokenPlacements[m.colorTokenIdx]
-			if def := m.tokenLib.FindTokenDef(p.TokenID); def != nil {
-				def.Color = tokenColors[m.colorCursor].color
+		if m.colorOverlayPositions != nil {
+			lc, ok := m.layerColors[m.currentLayer]
+			if !ok {
+				lc = make(map[[2]int]string)
+				m.layerColors[m.currentLayer] = lc
 			}
+			for _, pos := range m.colorOverlayPositions {
+				lc[pos] = tokenColors[m.colorCursor].color
+			}
+			m.colorOverlayPositions = nil
+		} else if m.colorTokenIdx >= 0 && m.colorTokenIdx < len(m.table.TokenPlacements) {
+			m.table.TokenPlacements[m.colorTokenIdx].Color = tokenColors[m.colorCursor].color
 		}
 		m.colorTokenIdx = -1
 		m.mode = modeNormal
 	case "esc":
 		m.colorTokenIdx = -1
+		m.colorOverlayPositions = nil
 		m.mode = modeNormal
 	}
 	return m, nil
@@ -1885,7 +2046,11 @@ func (m Model) viewTokenColor() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
-	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Token Color")))
+	title := "Token Color"
+	if m.colorOverlayPositions != nil {
+		title = "Color"
+	}
+	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render(title)))
 	for i, tc := range tokenColors {
 		prefix := "  "
 		if i == m.colorCursor {
@@ -1902,6 +2067,21 @@ func (m Model) viewTokenMenu() string {
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
 	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Token Library")))
+
+	if m.tokenConfirmDelete && m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+		item := m.tokenMenuItems[m.tokenMenuCursor]
+		name := "this item"
+		if item.kind == tmToken && item.tokenIdx < len(m.tokenLib.Defs) {
+			if len(m.tokenLib.Defs[item.tokenIdx].Properties) > 0 {
+				name = m.tokenLib.Defs[item.tokenIdx].Properties[0].Value
+			}
+		} else if item.kind == tmFolder {
+			name = "folder [" + item.folder + "]"
+		}
+		sb.WriteString(fmt.Sprintf("  Delete %s?\n\n", name))
+		sb.WriteString(styles.Subtle.Render("  y/enter: yes  n/esc: no"))
+		return sb.String()
+	}
 
 	if m.tokenCreateMode {
 		sb.WriteString("  New token: ")
@@ -1927,7 +2107,11 @@ func (m Model) viewTokenMenu() string {
 			prefix = "> "
 		}
 		if item.kind == tmFolder {
-			sb.WriteString(prefix + styles.Highlight.Render("["+item.folder+"]") + "\n")
+			arrow := "> "
+			if m.expandedFolders[item.folder] {
+				arrow = "v "
+			}
+			sb.WriteString(prefix + styles.Highlight.Render(arrow+"["+item.folder+"]") + "\n")
 		} else {
 			td := m.tokenLib.Defs[item.tokenIdx]
 			name := "???"

@@ -55,7 +55,7 @@ func ListSaved() ([]string, error) {
 
 	var files []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && e.Name() != "tokens.json" {
 			files = append(files, e.Name())
 		}
 	}

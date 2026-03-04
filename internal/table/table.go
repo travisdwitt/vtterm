@@ -19,6 +19,7 @@ type OverlayChar struct {
 	Y     int    `json:"y"`
 	R     string `json:"r"`
 	Layer int    `json:"layer,omitempty"`
+	Color string `json:"color,omitempty"`
 }
 
 type TokenProperty struct {
@@ -29,7 +30,6 @@ type TokenProperty struct {
 type TokenDef struct {
 	ID         string          `json:"id"`
 	Folder     string          `json:"folder,omitempty"`
-	Color      string          `json:"color,omitempty"` // ANSI color number, empty = default
 	Properties []TokenProperty `json:"properties"`
 }
 
@@ -39,6 +39,7 @@ type TokenPlacement struct {
 	Y       int    `json:"y"`
 	Layer   int    `json:"layer,omitempty"`
 	Facing  int    `json:"facing,omitempty"` // 0=up, rotates clockwise
+	Color   string `json:"color,omitempty"`  // ANSI color number, empty = default
 }
 
 type TokenLibrary struct {

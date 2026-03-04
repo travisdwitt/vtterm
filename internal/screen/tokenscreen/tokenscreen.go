@@ -38,13 +38,15 @@ type Model struct {
 	lib   *table.TokenLibrary
 	width int
 
-	mode       mode
-	cursor     int
-	items      []tokenMenuItem
-	createMode bool
-	folderMode bool
-	nameInput  textinput.Model
-	statusMsg  string
+	mode             mode
+	cursor           int
+	items            []tokenMenuItem
+	createMode       bool
+	folderMode       bool
+	confirmDelete    bool
+	expandedFolders map[string]bool
+	nameInput        textinput.Model
+	statusMsg        string
 
 	// edit mode
 	editIdx    int
@@ -56,7 +58,7 @@ type Model struct {
 type clearStatusMsg struct{}
 
 func New(lib *table.TokenLibrary, width int) Model {
-	m := Model{lib: lib, width: width}
+	m := Model{lib: lib, width: width, expandedFolders: make(map[string]bool)}
 	m.rebuildMenu()
 	return m
 }
@@ -94,6 +96,31 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.confirmDelete {
+		switch message.String() {
+		case "y", "enter":
+			if m.cursor >= 0 && m.cursor < len(m.items) {
+				item := m.items[m.cursor]
+				if item.kind == tmToken {
+					m.deleteToken(item.tokenIdx)
+				} else if item.kind == tmFolder {
+					m.deleteFolder(item.folder)
+				}
+				m.rebuildMenu()
+				if m.cursor >= len(m.items) {
+					m.cursor = len(m.items) - 1
+				}
+				if m.cursor < 0 {
+					m.cursor = 0
+				}
+			}
+			m.confirmDelete = false
+			return m, saveLibCmd(m.lib)
+		case "n", "esc":
+			m.confirmDelete = false
+		}
+		return m, nil
+	}
 	switch message.String() {
 	case "j", "down":
 		if m.cursor < len(m.items)-1 {
@@ -104,6 +131,17 @@ func (m Model) updateMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cursor--
 		}
 	case "enter":
+		if m.cursor >= 0 && m.cursor < len(m.items) {
+			item := m.items[m.cursor]
+			if item.kind == tmFolder {
+				m.expandedFolders[item.folder] = !m.expandedFolders[item.folder]
+				m.rebuildMenu()
+				if m.cursor >= len(m.items) {
+					m.cursor = len(m.items) - 1
+				}
+				return m, nil
+			}
+		}
 		m.statusMsg = styles.Error.Render("Can't add token to a table since no table is open.")
 		return m, clearAfter(3 * time.Second)
 	case "n":
@@ -130,20 +168,7 @@ func (m Model) updateMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		if m.cursor >= 0 && m.cursor < len(m.items) {
-			item := m.items[m.cursor]
-			if item.kind == tmToken {
-				m.deleteToken(item.tokenIdx)
-			} else if item.kind == tmFolder {
-				m.deleteFolder(item.folder)
-			}
-			m.rebuildMenu()
-			if m.cursor >= len(m.items) {
-				m.cursor = len(m.items) - 1
-			}
-			if m.cursor < 0 {
-				m.cursor = 0
-			}
-			return m, saveLibCmd(m.lib)
+			m.confirmDelete = true
 		}
 	case "esc":
 		return m, func() tea.Msg { return msg.GoToMainMenu{} }
@@ -301,9 +326,11 @@ func (m *Model) rebuildMenu() {
 	sort.Strings(folders)
 	for _, f := range folders {
 		m.items = append(m.items, tokenMenuItem{kind: tmFolder, folder: f})
-		for i, td := range m.lib.Defs {
-			if td.Folder == f {
-				m.items = append(m.items, tokenMenuItem{kind: tmToken, folder: f, tokenIdx: i})
+		if m.expandedFolders[f] {
+			for i, td := range m.lib.Defs {
+				if td.Folder == f {
+					m.items = append(m.items, tokenMenuItem{kind: tmToken, folder: f, tokenIdx: i})
+				}
 			}
 		}
 	}
@@ -335,10 +362,8 @@ func (m *Model) beginEdit(defIdx int) {
 	for _, prop := range td.Properties {
 		m.editLines = append(m.editLines, []rune(prop.Key+": "+prop.Value))
 	}
-	if len(m.editLines) == 0 {
-		m.editLines = [][]rune{{}}
-	}
-	m.editCurRow = 0
+	m.editLines = append(m.editLines, []rune{})
+	m.editCurRow = len(m.editLines) - 1
 	m.editCurCol = 0
 }
 
@@ -368,6 +393,21 @@ func (m Model) viewMenu() string {
 	sb.WriteByte('\n')
 	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Token Library")))
 
+	if m.confirmDelete && m.cursor >= 0 && m.cursor < len(m.items) {
+		item := m.items[m.cursor]
+		name := "this item"
+		if item.kind == tmToken && item.tokenIdx < len(m.lib.Defs) {
+			if len(m.lib.Defs[item.tokenIdx].Properties) > 0 {
+				name = m.lib.Defs[item.tokenIdx].Properties[0].Value
+			}
+		} else if item.kind == tmFolder {
+			name = "folder [" + item.folder + "]"
+		}
+		sb.WriteString(fmt.Sprintf("  Delete %s?\n\n", name))
+		sb.WriteString(styles.Subtle.Render("  y/enter: yes  n/esc: no"))
+		return sb.String()
+	}
+
 	if m.createMode {
 		sb.WriteString("  New token: ")
 		sb.WriteString(m.nameInput.View())
@@ -392,7 +432,11 @@ func (m Model) viewMenu() string {
 			prefix = "> "
 		}
 		if item.kind == tmFolder {
-			sb.WriteString(prefix + styles.Highlight.Render("["+item.folder+"]") + "\n")
+			arrow := "> "
+			if m.expandedFolders[item.folder] {
+				arrow = "v "
+			}
+			sb.WriteString(prefix + styles.Highlight.Render(arrow+"["+item.folder+"]") + "\n")
 		} else {
 			td := m.lib.Defs[item.tokenIdx]
 			name := "???"
