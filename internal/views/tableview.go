@@ -1,14 +1,14 @@
-package tableview
+package views
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/traviswitt/vtterm/internal/editor"
 	"github.com/traviswitt/vtterm/internal/grid"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
@@ -32,19 +32,6 @@ const (
 	modeTokenColor         // picking token color
 )
 
-type tokenMenuItemKind int
-
-const (
-	tmFolder tokenMenuItemKind = iota
-	tmToken
-)
-
-type tokenMenuItem struct {
-	kind     tokenMenuItemKind
-	folder   string
-	tokenIdx int // index into table.TokenDefs (tmToken only)
-}
-
 var tokenColors = []struct {
 	name  string
 	color string
@@ -67,89 +54,83 @@ var tokenColors = []struct {
 	{"Gray", "248"},
 }
 
-type Model struct {
+type TableViewModel struct {
 	table     table.Table
 	tokenLib  *table.TokenLibrary
-	gridLines []string // raw unstyled lines from renderer
+	gridLines []string
 	showQuit  bool
 	statusMsg string
 	width     int
 	height    int
-	cursorX   int // screen-space cursor X
-	cursorY   int // screen-space cursor Y
-	panX      int // viewport X offset
-	panY      int // viewport Y offset
+	cursorX   int
+	cursorY   int
+	panX      int
+	panY      int
 	panMode   bool
 
 	mode         inputMode
-	prevMode     inputMode                // mode to return to from modeLayer/modeMPending
-	layers       map[int]map[[2]int]rune   // layer index → overlay map
-	layerColors  map[int]map[[2]int]string // layer index → per-char color
-	currentLayer int                       // active layer (default 0)
-	pending      map[[2]int]rune          // in-progress shape
+	prevMode     inputMode
+	layers       map[int]map[[2]int]rune
+	layerColors  map[int]map[[2]int]string
+	currentLayer int
+	pending      map[[2]int]rune
 	lineStarted  bool
 	boxAnchorX   int
 	boxAnchorY   int
 	boxW         int
 	boxH         int
 
-	textLines   [][]rune // text buffer (lines of runes)
-	textAnchorX int      // world X of top-left
-	textAnchorY int      // world Y of top-left
-	textCurRow  int      // cursor row in textLines
-	textCurCol  int      // cursor col in textLines
+	textLines   [][]rune
+	textAnchorX int
+	textAnchorY int
+	textCurRow  int
+	textCurCol  int
 
-	moving           map[[2]int]rune   // characters being moved (at original positions)
-	movingColors     map[[2]int]string // colors of characters being moved
-	moveOriginColors map[[2]int]string // snapshot of colors for cancel/restore
-	moveOrigin       map[[2]int]rune   // snapshot for cancel/restore
+	moving           map[[2]int]rune
+	movingColors     map[[2]int]string
+	moveOriginColors map[[2]int]string
+	moveOrigin       map[[2]int]rune
 	moveOffsetX      int
 	moveOffsetY      int
-	moveSourceLayer  int // layer the shape was picked from (for esc cancel)
+	moveSourceLayer  int
 
 	nameInput textinput.Model
 
-	// Token menu
-	tokenMenuCursor      int
-	tokenMenuItems       []tokenMenuItem
-	tokenCreateMode      bool
-	tokenFolderMode      bool
-	tokenConfirmDelete   bool
-	expandedFolders     map[string]bool
+	tokenMenuCursor    int
+	tokenMenuItems     []tokenMenuItem
+	tokenCreateMode    bool
+	tokenFolderMode    bool
+	tokenConfirmDelete bool
+	expandedFolders    map[string]bool
 
-	// Token editing
-	tokenEditIdx    int      // index into table.TokenDefs
-	tokenEditLines  [][]rune // "Key: Value" lines
-	tokenEditCurRow int
-	tokenEditCurCol int
+	tokenEditor editor.Editor
+	tokenEditIdx int
 
-	// Token movement (extends existing modeMove)
-	movingTokenIdx       int // index into TokenPlacements, -1 = none
+	movingTokenIdx       int
 	tokenMoveOffsetX     int
 	tokenMoveOffsetY     int
 	tokenMoveOriginX     int
 	tokenMoveOriginY     int
 	tokenMoveOriginLayer int
 
-	// Token inspect
-	inspectTokenIdx int // index into TokenPlacements, -1 = hidden
+	inspectTokenIdx int
+	deleteTokenIdx  int
 
-	// Token delete confirmation
-	deleteTokenIdx int // index into TokenPlacements, -1 = hidden
+	colorTokenIdx         int
+	colorOverlayPositions [][2]int
+	colorCursor           int
 
-	// Color picker (shared between tokens and overlay)
-	colorTokenIdx          int       // index into TokenPlacements, -1 = hidden
-	colorOverlayPositions  [][2]int  // overlay positions to color (nil = not coloring overlay)
-	colorCursor            int
-
-	// Shared text input for token name/folder entry
 	tokenNameInput textinput.Model
 }
 
-type clearStatusMsg struct{}
+type tvSaveResultMsg struct{ err error }
+type exportResultMsg struct {
+	path string
+	err  error
+}
 
-func New(t table.Table, lib *table.TokenLibrary, w, h int) Model {
-	m := Model{table: t, tokenLib: lib, width: w, height: h}
+func NewTableView(t table.Table, lib *table.TokenLibrary, w, h int) TableViewModel {
+	m := TableViewModel{table: t, tokenLib: lib, width: w, height: h}
 	m.layers = make(map[int]map[[2]int]rune)
 	m.layerColors = make(map[int]map[[2]int]string)
 	m.movingTokenIdx = -1
@@ -162,7 +143,7 @@ func New(t table.Table, lib *table.TokenLibrary, w, h int) Model {
 	return m
 }
 
-func (m *Model) activeOverlay() map[[2]int]rune {
+func (m *TableViewModel) activeOverlay() map[[2]int]rune {
 	ol, ok := m.layers[m.currentLayer]
 	if !ok {
 		ol = make(map[[2]int]rune)
@@ -171,7 +152,7 @@ func (m *Model) activeOverlay() map[[2]int]rune {
 	return ol
 }
 
-func (m *Model) syncOverlayToTable() {
+func (m *TableViewModel) syncOverlayToTable() {
 	var total int
 	for _, ol := range m.layers {
 		total += len(ol)
@@ -194,7 +175,7 @@ func (m *Model) syncOverlayToTable() {
 	m.table.Overlay = chars
 }
 
-func (m *Model) loadOverlayFromTable() {
+func (m *TableViewModel) loadOverlayFromTable() {
 	if len(m.table.Overlay) == 0 {
 		return
 	}
@@ -221,7 +202,7 @@ func (m *Model) loadOverlayFromTable() {
 	}
 }
 
-func (m *Model) renderGrid() {
+func (m *TableViewModel) renderGrid() {
 	var raw string
 	switch m.table.GridType {
 	case table.GridTypeGrid:
@@ -235,11 +216,11 @@ func (m *Model) renderGrid() {
 	m.gridLines = strings.Split(strings.TrimRight(raw, "\n"), "\n")
 }
 
-func (m Model) Init() tea.Cmd {
+func (m TableViewModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = message.Width
@@ -248,7 +229,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case clearStatusMsg:
 		m.statusMsg = ""
 		return m, nil
-	case saveResultMsg:
+	case tvSaveResultMsg:
 		if message.err != nil {
 			m.statusMsg = styles.Error.Render("Save failed: " + message.err.Error())
 		} else {
@@ -299,7 +280,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	hasGrid := m.table.GridType != table.GridTypeNone
 
@@ -317,9 +298,9 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.nameInput.Focus()
 		}
 		m.syncOverlayToTable()
-		return m, saveCmd(m.table)
+		return m, tvSaveCmd(m.table)
 	case "S":
-		return m, exportCmd(m.table)
+		return m, tvExportCmd(m.table)
 	case "ctrl+c":
 		return m, tea.Quit
 
@@ -404,7 +385,7 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case "T":
 		if hasGrid {
-			m.rebuildTokenMenu()
+			m.tokenMenuItems = buildTokenMenu(m.tokenLib, m.expandedFolders)
 			m.tokenMenuCursor = 0
 			m.tokenCreateMode = false
 			m.tokenFolderMode = false
@@ -429,7 +410,8 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				tid := m.table.TokenPlacements[pi].TokenID
 				for di := range m.tokenLib.Defs {
 					if m.tokenLib.Defs[di].ID == tid {
-						m.beginTokenEdit(di)
+						m.tokenEditIdx = di
+						m.tokenEditor.Begin(m.tokenLib.Defs[di].Properties)
 						m.mode = modeTokenEdit
 						break
 					}
@@ -458,7 +440,6 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				def := m.tokenLib.FindTokenDef(m.table.TokenPlacements[pi].TokenID)
 				if def != nil {
 					if def.IsDisabled() {
-						// Remove the Disabled property
 						props := def.Properties[:0]
 						for _, p := range def.Properties {
 							if p.Key != "Disabled" {
@@ -490,7 +471,6 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.colorTokenIdx = pi
 				m.colorOverlayPositions = nil
 				m.colorCursor = 0
-				// Pre-select the placement's current color
 				if c := m.table.TokenPlacements[pi].Color; c != "" {
 					for i, tc := range tokenColors {
 						if tc.color == c {
@@ -506,7 +486,6 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					m.colorTokenIdx = -1
 					m.colorOverlayPositions = positions
 					m.colorCursor = 0
-					// Pre-select the overlay's current color
 					if lc := m.layerColors[m.currentLayer]; lc != nil {
 						if c, ok := lc[[2]int{wx, wy}]; ok {
 							for i, tc := range tokenColors {
@@ -538,7 +517,7 @@ func (m Model) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateSaveName(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateSaveName(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "enter":
 		name := m.nameInput.Value()
@@ -548,7 +527,7 @@ func (m Model) updateSaveName(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.table.Name = name
 		m.syncOverlayToTable()
 		m.mode = modeNormal
-		return m, saveCmd(m.table)
+		return m, tvSaveCmd(m.table)
 	case "esc":
 		m.mode = modeNormal
 		return m, nil
@@ -558,13 +537,12 @@ func (m Model) updateSaveName(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "m":
 		if m.prevMode == modeNormal {
 			wx := m.cursorX + m.panX
 			wy := m.cursorY + m.panY
-			// Check tokens first
 			ti := m.findTokenPlacementAt(wx, wy)
 			if ti >= 0 {
 				m.movingTokenIdx = ti
@@ -576,11 +554,9 @@ func (m Model) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.tokenMoveOffsetY = 0
 				m.mode = modeMove
 			} else {
-				// Initiate move: flood select from activeOverlay at cursor
 				ol := m.activeOverlay()
 				if _, ok := ol[[2]int{wx, wy}]; ok {
 					m.moving = m.floodSelectOverlay(wx, wy)
-					// Grab colors for the moving chars
 					lc := m.layerColors[m.currentLayer]
 					m.movingColors = make(map[[2]int]string, len(m.moving))
 					for k := range m.moving {
@@ -640,7 +616,7 @@ func (m Model) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateLayer(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateLayer(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "+", "=":
 		m.currentLayer++
@@ -685,7 +661,7 @@ func (m Model) updateLayer(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateDrawMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateDrawMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "l":
 		m.mode = modeDrawLine
@@ -705,7 +681,7 @@ func (m Model) updateDrawMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateDrawLine(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateDrawLine(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "h", "left":
 		m.depositLineChar(-1, 0)
@@ -729,7 +705,7 @@ func (m Model) updateDrawLine(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateDrawBox(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateDrawBox(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "l", "right":
 		m.boxW++
@@ -757,18 +733,16 @@ func (m Model) updateDrawBox(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateText(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateText(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	switch key {
 	case "enter":
-		// Split current line at cursor
 		line := m.textLines[m.textCurRow]
 		before := make([]rune, m.textCurCol)
 		copy(before, line[:m.textCurCol])
 		after := make([]rune, len(line)-m.textCurCol)
 		copy(after, line[m.textCurCol:])
 		m.textLines[m.textCurRow] = before
-		// Insert new line after current row
 		newLines := make([][]rune, len(m.textLines)+1)
 		copy(newLines, m.textLines[:m.textCurRow+1])
 		newLines[m.textCurRow+1] = after
@@ -835,7 +809,6 @@ func (m Model) updateText(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeNormal
 		return m, nil
 	default:
-		// Insert printable characters
 		if len(message.Text) > 0 {
 			r := []rune(message.Text)
 			line := m.textLines[m.textCurRow]
@@ -852,7 +825,7 @@ func (m Model) updateText(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) rebuildTextPending() {
+func (m *TableViewModel) rebuildTextPending() {
 	m.pending = make(map[[2]int]rune)
 	for row, line := range m.textLines {
 		for col, ch := range line {
@@ -861,7 +834,7 @@ func (m *Model) rebuildTextPending() {
 	}
 }
 
-func (m Model) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.movingTokenIdx >= 0 {
 		return m.updateMoveToken(message)
 	}
@@ -924,7 +897,7 @@ func (m Model) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "h", "left":
 		m.tokenMoveOffsetX--
@@ -953,8 +926,7 @@ func (m Model) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// floodSelectOverlayPositions returns positions of all overlay chars connected to (startX, startY).
-func (m Model) floodSelectOverlayPositions(startX, startY int) [][2]int {
+func (m TableViewModel) floodSelectOverlayPositions(startX, startY int) [][2]int {
 	ol := m.layers[m.currentLayer]
 	if ol == nil {
 		return nil
@@ -986,38 +958,17 @@ func (m Model) floodSelectOverlayPositions(startX, startY int) [][2]int {
 	return result
 }
 
-func (m *Model) floodSelectOverlay(startX, startY int) map[[2]int]rune {
+func (m *TableViewModel) floodSelectOverlay(startX, startY int) map[[2]int]rune {
+	positions := m.floodSelectOverlayPositions(startX, startY)
 	ol := m.activeOverlay()
-	result := make(map[[2]int]rune)
-	queue := [][2]int{{startX, startY}}
-	visited := make(map[[2]int]bool)
-
-	for len(queue) > 0 {
-		pos := queue[0]
-		queue = queue[1:]
-		if visited[pos] {
-			continue
-		}
-		visited[pos] = true
-
-		r, ok := ol[pos]
-		if !ok {
-			continue
-		}
-		result[pos] = r
-
-		// 4-directional neighbors
-		for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
-			next := [2]int{pos[0] + d[0], pos[1] + d[1]}
-			if !visited[next] {
-				queue = append(queue, next)
-			}
-		}
+	result := make(map[[2]int]rune, len(positions))
+	for _, pos := range positions {
+		result[pos] = ol[pos]
 	}
 	return result
 }
 
-func (m *Model) depositLineChar(dx, dy int) {
+func (m *TableViewModel) depositLineChar(dx, dy int) {
 	maxX := m.width - 1
 	if maxX < 0 {
 		maxX = 0
@@ -1030,7 +981,7 @@ func (m *Model) depositLineChar(dx, dy int) {
 	newSX := m.cursorX + dx
 	newSY := m.cursorY + dy
 	if newSX < 0 || newSX > maxX || newSY < 0 || newSY > maxY {
-		return // would be clamped, skip
+		return
 	}
 
 	wx := m.cursorX + m.panX
@@ -1074,29 +1025,27 @@ func (m *Model) depositLineChar(dx, dy int) {
 	m.cursorY = newSY
 }
 
-func (m *Model) rebuildBoxPending() {
+func (m *TableViewModel) rebuildBoxPending() {
 	m.pending = make(map[[2]int]rune)
 	ax, ay := m.boxAnchorX, m.boxAnchorY
 	w, h := m.boxW, m.boxH
 
-	// Draw edges
 	for x := range w {
-		m.pending[[2]int{ax + x, ay}] = '-'         // top
-		m.pending[[2]int{ax + x, ay + h - 1}] = '-' // bottom
+		m.pending[[2]int{ax + x, ay}] = '-'
+		m.pending[[2]int{ax + x, ay + h - 1}] = '-'
 	}
 	for y := range h {
-		m.pending[[2]int{ax, ay + y}] = '|'         // left
-		m.pending[[2]int{ax + w - 1, ay + y}] = '|' // right
+		m.pending[[2]int{ax, ay + y}] = '|'
+		m.pending[[2]int{ax + w - 1, ay + y}] = '|'
 	}
 
-	// Corners (written last to overwrite edges)
 	m.pending[[2]int{ax, ay}] = '+'
 	m.pending[[2]int{ax + w - 1, ay}] = '+'
 	m.pending[[2]int{ax, ay + h - 1}] = '+'
 	m.pending[[2]int{ax + w - 1, ay + h - 1}] = '+'
 }
 
-func (m *Model) commitPending() {
+func (m *TableViewModel) commitPending() {
 	ol := m.activeOverlay()
 	for k, v := range m.pending {
 		ol[k] = v
@@ -1104,12 +1053,12 @@ func (m *Model) commitPending() {
 	m.pending = nil
 }
 
-func (m *Model) clampCursor() {
+func (m *TableViewModel) clampCursor() {
 	maxX := m.width - 1
 	if maxX < 0 {
 		maxX = 0
 	}
-	maxY := m.height - 2 // 1 row reserved for top bar
+	maxY := m.height - 2
 	if maxY < 0 {
 		maxY = 0
 	}
@@ -1127,7 +1076,7 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func (m *Model) centerFunc() grid.CenterFunc {
+func (m *TableViewModel) centerFunc() grid.CenterFunc {
 	switch m.table.GridType {
 	case table.GridTypeGrid:
 		return grid.SquareCellCenter
@@ -1138,7 +1087,7 @@ func (m *Model) centerFunc() grid.CenterFunc {
 	}
 }
 
-func (m *Model) detectCell(wx, wy int) (col, row int, ok bool) {
+func (m *TableViewModel) detectCell(wx, wy int) (col, row int, ok bool) {
 	cols, rows := m.table.Width, m.table.Height
 	switch m.table.GridType {
 	case table.GridTypeGrid:
@@ -1150,7 +1099,7 @@ func (m *Model) detectCell(wx, wy int) (col, row int, ok bool) {
 	}
 }
 
-func (m *Model) handleTab(reverse bool) {
+func (m *TableViewModel) handleTab(reverse bool) {
 	cols, rows := m.table.Width, m.table.Height
 	if cols == 0 || rows == 0 {
 		return
@@ -1163,13 +1112,11 @@ func (m *Model) handleTab(reverse bool) {
 	nearCol, nearRow := grid.NearestCell(wx, wy, cols, rows, cfn)
 	cx, cy := cfn(nearCol, nearRow)
 
-	// If cursor is not at the nearest cell's center, snap to it.
 	if wx != cx || wy != cy {
 		m.panToWorld(cx, cy)
 		return
 	}
 
-	// Already at center: advance to next/previous cell in row-major order.
 	idx := nearRow*cols + nearCol
 	if reverse {
 		idx--
@@ -1188,9 +1135,7 @@ func (m *Model) handleTab(reverse bool) {
 	m.panToWorld(nx, ny)
 }
 
-// panToWorld moves the cursor to world position (wx, wy), adjusting pan offsets
-// if needed to keep the cursor within screen bounds.
-func (m *Model) panToWorld(wx, wy int) {
+func (m *TableViewModel) panToWorld(wx, wy int) {
 	m.cursorX = wx - m.panX
 	m.cursorY = wy - m.panY
 
@@ -1220,7 +1165,7 @@ func (m *Model) panToWorld(wx, wy int) {
 	}
 }
 
-func (m Model) updateQuitDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateQuitDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "y", "enter":
 		return m, func() tea.Msg { return msg.GoToMainMenu{} }
@@ -1230,7 +1175,7 @@ func (m Model) updateQuitDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateDeleteTokenDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m TableViewModel) updateDeleteTokenDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "y", "enter":
 		if m.deleteTokenIdx >= 0 && m.deleteTokenIdx < len(m.table.TokenPlacements) {
@@ -1238,7 +1183,6 @@ func (m Model) updateDeleteTokenDialog(message tea.KeyPressMsg) (tea.Model, tea.
 				m.table.TokenPlacements[:m.deleteTokenIdx],
 				m.table.TokenPlacements[m.deleteTokenIdx+1:]...,
 			)
-			// Fix up inspect index if it was pointing at or after the removed placement
 			if m.inspectTokenIdx == m.deleteTokenIdx {
 				m.inspectTokenIdx = -1
 			} else if m.inspectTokenIdx > m.deleteTokenIdx {
@@ -1252,33 +1196,244 @@ func (m Model) updateDeleteTokenDialog(message tea.KeyPressMsg) (tea.Model, tea.
 	return m, nil
 }
 
-type saveResultMsg struct{ err error }
-type exportResultMsg struct {
-	path string
-	err  error
-}
-
-func saveCmd(t table.Table) tea.Cmd {
+func tvSaveCmd(t table.Table) tea.Cmd {
 	return func() tea.Msg {
 		err := table.Save(&t)
-		return saveResultMsg{err: err}
+		return tvSaveResultMsg{err: err}
 	}
 }
 
-func exportCmd(t table.Table) tea.Cmd {
+func tvExportCmd(t table.Table) tea.Cmd {
 	return func() tea.Msg {
 		path, err := table.Export(&t)
 		return exportResultMsg{path: path, err: err}
 	}
 }
 
-func clearAfter(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(time.Time) tea.Msg {
-		return clearStatusMsg{}
-	})
+func (m TableViewModel) resolveTokenColor(p table.TokenPlacement) string {
+	def := m.tokenLib.FindTokenDef(p.TokenID)
+	if def != nil && def.IsDisabled() {
+		return "disabled"
+	}
+	if p.Color != "" {
+		return p.Color
+	}
+	return "214"
 }
 
-func (m Model) View() tea.View {
+func (m TableViewModel) findTokenPlacementAt(wx, wy int) int {
+	for i, p := range m.table.TokenPlacements {
+		if p.Layer != m.currentLayer {
+			continue
+		}
+		if wx >= p.X && wx < p.X+5 && wy >= p.Y && wy < p.Y+3 {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m TableViewModel) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.tokenConfirmDelete {
+		switch message.String() {
+		case "y", "enter":
+			if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+				item := m.tokenMenuItems[m.tokenMenuCursor]
+				if item.kind == tmToken {
+					m.tvDeleteToken(item.tokenIdx)
+				} else if item.kind == tmFolder {
+					deleteFolder(m.tokenLib, item.folder)
+				}
+				m.tokenMenuItems = buildTokenMenu(m.tokenLib, m.expandedFolders)
+				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
+					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
+				}
+				if m.tokenMenuCursor < 0 {
+					m.tokenMenuCursor = 0
+				}
+			}
+			m.tokenConfirmDelete = false
+		case "n", "esc":
+			m.tokenConfirmDelete = false
+		}
+		return m, nil
+	}
+	if m.tokenCreateMode || m.tokenFolderMode {
+		return m.updateTokenMenuInput(message)
+	}
+	switch message.String() {
+	case "j", "down":
+		if m.tokenMenuCursor < len(m.tokenMenuItems)-1 {
+			m.tokenMenuCursor++
+		}
+	case "k", "up":
+		if m.tokenMenuCursor > 0 {
+			m.tokenMenuCursor--
+		}
+	case "enter":
+		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+			item := m.tokenMenuItems[m.tokenMenuCursor]
+			if item.kind == tmFolder {
+				m.expandedFolders[item.folder] = !m.expandedFolders[item.folder]
+				m.tokenMenuItems = buildTokenMenu(m.tokenLib, m.expandedFolders)
+				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
+					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
+				}
+			} else if item.kind == tmToken {
+				td := m.tokenLib.Defs[item.tokenIdx]
+				wx := m.cursorX + m.panX
+				wy := m.cursorY + m.panY
+				m.table.TokenPlacements = append(m.table.TokenPlacements, table.TokenPlacement{
+					TokenID: td.ID,
+					X:       wx - 2,
+					Y:       wy - 1,
+					Layer:   m.currentLayer,
+				})
+				m.mode = modeNormal
+			}
+		}
+	case "n":
+		ti := textinput.New()
+		ti.Placeholder = "token name"
+		ti.CharLimit = 64
+		m.tokenNameInput = ti
+		m.tokenCreateMode = true
+		return m, m.tokenNameInput.Focus()
+	case "f":
+		ti := textinput.New()
+		ti.Placeholder = "folder name"
+		ti.CharLimit = 64
+		m.tokenNameInput = ti
+		m.tokenFolderMode = true
+		return m, m.tokenNameInput.Focus()
+	case "e":
+		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+			item := m.tokenMenuItems[m.tokenMenuCursor]
+			if item.kind == tmToken {
+				m.tokenEditIdx = item.tokenIdx
+				m.tokenEditor.Begin(m.tokenLib.Defs[item.tokenIdx].Properties)
+				m.mode = modeTokenEdit
+			}
+		}
+	case "d":
+		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+			m.tokenConfirmDelete = true
+		}
+	case "esc":
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+func (m TableViewModel) updateTokenMenuInput(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "enter":
+		name := m.tokenNameInput.Value()
+		if name == "" {
+			m.tokenCreateMode = false
+			m.tokenFolderMode = false
+			return m, nil
+		}
+		if m.tokenCreateMode {
+			folder := ""
+			if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
+				item := m.tokenMenuItems[m.tokenMenuCursor]
+				if item.kind == tmFolder {
+					folder = item.folder
+				} else if item.folder != "" {
+					folder = item.folder
+				}
+			}
+			m.tokenLib.Defs = append(m.tokenLib.Defs, table.TokenDef{
+				ID:     table.NewTokenID(),
+				Folder: folder,
+				Properties: []table.TokenProperty{
+					{Key: "Name", Value: name},
+				},
+			})
+			m.tokenCreateMode = false
+		} else if m.tokenFolderMode {
+			m.tokenLib.Folders = append(m.tokenLib.Folders, name)
+			m.tokenFolderMode = false
+		}
+		m.tokenMenuItems = buildTokenMenu(m.tokenLib, m.expandedFolders)
+		if len(m.tokenMenuItems) > 0 {
+			m.tokenMenuCursor = len(m.tokenMenuItems) - 1
+		}
+		return m, nil
+	case "esc":
+		m.tokenCreateMode = false
+		m.tokenFolderMode = false
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.tokenNameInput, cmd = m.tokenNameInput.Update(message)
+	return m, cmd
+}
+
+func (m TableViewModel) updateTokenEdit(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	done, cancelled := m.tokenEditor.HandleKey(message)
+	if done {
+		m.tokenLib.Defs[m.tokenEditIdx].Properties = m.tokenEditor.Commit()
+		m.mode = modeNormal
+		return m, nil
+	}
+	if cancelled {
+		m.mode = modeNormal
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m TableViewModel) updateTokenColor(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "j", "down":
+		if m.colorCursor < len(tokenColors)-1 {
+			m.colorCursor++
+		}
+	case "k", "up":
+		if m.colorCursor > 0 {
+			m.colorCursor--
+		}
+	case "enter":
+		if m.colorOverlayPositions != nil {
+			lc, ok := m.layerColors[m.currentLayer]
+			if !ok {
+				lc = make(map[[2]int]string)
+				m.layerColors[m.currentLayer] = lc
+			}
+			for _, pos := range m.colorOverlayPositions {
+				lc[pos] = tokenColors[m.colorCursor].color
+			}
+			m.colorOverlayPositions = nil
+		} else if m.colorTokenIdx >= 0 && m.colorTokenIdx < len(m.table.TokenPlacements) {
+			m.table.TokenPlacements[m.colorTokenIdx].Color = tokenColors[m.colorCursor].color
+		}
+		m.colorTokenIdx = -1
+		m.mode = modeNormal
+	case "esc":
+		m.colorTokenIdx = -1
+		m.colorOverlayPositions = nil
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+// tvDeleteToken removes a token def and all its placements from the table.
+func (m *TableViewModel) tvDeleteToken(idx int) {
+	tid := m.tokenLib.Defs[idx].ID
+	deleteTokenDef(m.tokenLib, idx)
+	placements := m.table.TokenPlacements[:0]
+	for _, p := range m.table.TokenPlacements {
+		if p.TokenID != tid {
+			placements = append(placements, p)
+		}
+	}
+	m.table.TokenPlacements = placements
+	m.inspectTokenIdx = -1
+}
+
+func (m TableViewModel) View() tea.View {
 	if m.showQuit {
 		return tea.NewView(m.viewQuitDialog())
 	}
@@ -1299,7 +1454,7 @@ func (m Model) View() tea.View {
 		return tea.NewView(m.topBar() + "\n")
 	}
 
-	vpH := m.height - 1 // 1 row for top bar
+	vpH := m.height - 1
 	if vpH < 1 {
 		vpH = 1
 	}
@@ -1311,7 +1466,7 @@ func (m Model) View() tea.View {
 	return tea.NewView(m.topBar() + "\n" + m.renderViewport(vpW, vpH))
 }
 
-func (m Model) renderViewport(vpW, vpH int) string {
+func (m TableViewModel) renderViewport(vpW, vpH int) string {
 	var sb strings.Builder
 	for sy := range vpH {
 		wy := sy + m.panY
@@ -1339,11 +1494,7 @@ func (m Model) renderViewport(vpW, vpH int) string {
 	return sb.String()
 }
 
-// worldLine extracts a horizontal slice of width w from gridLines at world row wy,
-// starting at panX offset. Returns runes, per-position overlay color ("" = not overlay,
-// else ANSI color), and per-position token color ("" = not a token, "disabled" = gray,
-// otherwise ANSI color number).
-func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
+func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
 	var gridRunes []rune
 	if wy >= 0 && wy < len(m.gridLines) {
 		gridRunes = []rune(m.gridLines[wy])
@@ -1352,7 +1503,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 	overlayColor := make([]string, w)
 	tokenColor := make([]string, w)
 
-	// Base: grid
 	for i := range w {
 		wx := i + m.panX
 		if wx >= 0 && wx < len(gridRunes) {
@@ -1362,7 +1512,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Show only the current layer
 	ol := m.layers[m.currentLayer]
 	lc := m.layerColors[m.currentLayer]
 	if ol != nil {
@@ -1384,7 +1533,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Token placements on current layer (skip movingTokenIdx)
 	for pi, p := range m.table.TokenPlacements {
 		if p.Layer != m.currentLayer {
 			continue
@@ -1404,7 +1552,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Moving token at offset position
 	if m.movingTokenIdx >= 0 && m.movingTokenIdx < len(m.table.TokenPlacements) {
 		p := m.table.TokenPlacements[m.movingTokenIdx]
 		tc := m.resolveTokenColor(p)
@@ -1426,7 +1573,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Inspect tooltip
 	if m.inspectTokenIdx >= 0 && m.inspectTokenIdx < len(m.table.TokenPlacements) {
 		p := m.table.TokenPlacements[m.inspectTokenIdx]
 		def := m.tokenLib.FindTokenDef(p.TokenID)
@@ -1442,7 +1588,7 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 					sx := tooltipX + ci - m.panX
 					if sx >= 0 && sx < w {
 						result[sx] = r
-						tokenColor[sx] = "214" // tooltip always orange
+						tokenColor[sx] = "214"
 						overlayColor[sx] = ""
 					}
 				}
@@ -1450,7 +1596,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Moving shape on top (at offset)
 	if m.moving != nil {
 		for i := range w {
 			wx := i + m.panX
@@ -1467,7 +1612,6 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	// Pending on top
 	for i := range w {
 		wx := i + m.panX
 		if r, ok := m.pending[[2]int{wx, wy}]; ok {
@@ -1480,7 +1624,7 @@ func (m Model) worldLine(wy, w int) ([]rune, []string, []string) {
 	return result, overlayColor, tokenColor
 }
 
-func (m Model) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
+func (m TableViewModel) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
 	def := m.tokenLib.FindTokenDef(p.TokenID)
 	label := "???"
 	if def != nil {
@@ -1489,26 +1633,22 @@ func (m Model) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
 	labelRunes := []rune(label)
 
 	box := make(map[[2]int]rune)
-	// Row 0: top border  +---+
 	box[[2]int{p.X, p.Y}] = '+'
 	box[[2]int{p.X + 1, p.Y}] = '-'
 	box[[2]int{p.X + 2, p.Y}] = '-'
 	box[[2]int{p.X + 3, p.Y}] = '-'
 	box[[2]int{p.X + 4, p.Y}] = '+'
-	// Row 1: |lbl|
 	box[[2]int{p.X, p.Y + 1}] = '|'
 	for i, r := range labelRunes {
 		box[[2]int{p.X + 1 + i, p.Y + 1}] = r
 	}
 	box[[2]int{p.X + 4, p.Y + 1}] = '|'
-	// Row 2: bottom border  +---+
 	box[[2]int{p.X, p.Y + 2}] = '+'
 	box[[2]int{p.X + 1, p.Y + 2}] = '-'
 	box[[2]int{p.X + 2, p.Y + 2}] = '-'
 	box[[2]int{p.X + 3, p.Y + 2}] = '-'
 	box[[2]int{p.X + 4, p.Y + 2}] = '+'
 
-	// Facing arrow
 	if m.table.GridType == table.GridTypeHex {
 		switch p.Facing % 6 {
 		case 0:
@@ -1540,7 +1680,7 @@ func (m Model) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
 	return box
 }
 
-func (m Model) topBar() string {
+func (m TableViewModel) topBar() string {
 	if m.mode == modeSaveName {
 		left := styles.Highlight.Render("Save as: ") + m.nameInput.View()
 		right := styles.Subtle.Render("enter: save  esc: cancel")
@@ -1642,7 +1782,7 @@ func (m Model) topBar() string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m Model) viewQuitDialog() string {
+func (m TableViewModel) viewQuitDialog() string {
 	s := fmt.Sprintf("\n\n%s\n\n", styles.Title.Render("Quit?"))
 	s += "  Are you sure you want to quit?\n"
 	s += "  Unsaved changes will be lost.\n\n"
@@ -1650,7 +1790,7 @@ func (m Model) viewQuitDialog() string {
 	return s
 }
 
-func (m Model) viewDeleteTokenDialog() string {
+func (m TableViewModel) viewDeleteTokenDialog() string {
 	name := "this token"
 	if m.deleteTokenIdx >= 0 && m.deleteTokenIdx < len(m.table.TokenPlacements) {
 		p := m.table.TokenPlacements[m.deleteTokenIdx]
@@ -1664,385 +1804,7 @@ func (m Model) viewDeleteTokenDialog() string {
 	return s
 }
 
-// --- Token helpers ---
-
-// resolveTokenColor returns the effective color string for a token placement:
-// "disabled" if the def is disabled, the placement's Color if set, or "214" (default orange).
-func (m Model) resolveTokenColor(p table.TokenPlacement) string {
-	def := m.tokenLib.FindTokenDef(p.TokenID)
-	if def != nil && def.IsDisabled() {
-		return "disabled"
-	}
-	if p.Color != "" {
-		return p.Color
-	}
-	return "214"
-}
-
-func (m Model) findTokenPlacementAt(wx, wy int) int {
-	for i, p := range m.table.TokenPlacements {
-		if p.Layer != m.currentLayer {
-			continue
-		}
-		if wx >= p.X && wx < p.X+5 && wy >= p.Y && wy < p.Y+3 {
-			return i
-		}
-	}
-	return -1
-}
-
-func (m *Model) rebuildTokenMenu() {
-	m.tokenMenuItems = nil
-	// Unfiled tokens first
-	for i, td := range m.tokenLib.Defs {
-		if td.Folder == "" {
-			m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmToken, tokenIdx: i})
-		}
-	}
-	// Sorted folders
-	folders := make([]string, len(m.tokenLib.Folders))
-	copy(folders, m.tokenLib.Folders)
-	sort.Strings(folders)
-	for _, f := range folders {
-		m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmFolder, folder: f})
-		if m.expandedFolders[f] {
-			for i, td := range m.tokenLib.Defs {
-				if td.Folder == f {
-					m.tokenMenuItems = append(m.tokenMenuItems, tokenMenuItem{kind: tmToken, folder: f, tokenIdx: i})
-				}
-			}
-		}
-	}
-}
-
-func (m *Model) deleteToken(idx int) {
-	tid := m.tokenLib.Defs[idx].ID
-	m.tokenLib.Defs = append(m.tokenLib.Defs[:idx], m.tokenLib.Defs[idx+1:]...)
-	// Remove all placements for this token
-	placements := m.table.TokenPlacements[:0]
-	for _, p := range m.table.TokenPlacements {
-		if p.TokenID != tid {
-			placements = append(placements, p)
-		}
-	}
-	m.table.TokenPlacements = placements
-	// Reset inspect if it was pointing at a removed placement
-	m.inspectTokenIdx = -1
-}
-
-func (m *Model) deleteFolder(name string) {
-	// Unfolder tokens (set folder to "")
-	for i := range m.tokenLib.Defs {
-		if m.tokenLib.Defs[i].Folder == name {
-			m.tokenLib.Defs[i].Folder = ""
-		}
-	}
-	// Remove folder from list
-	folders := m.tokenLib.Folders[:0]
-	for _, f := range m.tokenLib.Folders {
-		if f != name {
-			folders = append(folders, f)
-		}
-	}
-	m.tokenLib.Folders = folders
-}
-
-func (m *Model) beginTokenEdit(defIdx int) {
-	m.tokenEditIdx = defIdx
-	td := m.tokenLib.Defs[defIdx]
-	m.tokenEditLines = nil
-	for _, prop := range td.Properties {
-		m.tokenEditLines = append(m.tokenEditLines, []rune(prop.Key+": "+prop.Value))
-	}
-	m.tokenEditLines = append(m.tokenEditLines, []rune{})
-	m.tokenEditCurRow = len(m.tokenEditLines) - 1
-	m.tokenEditCurCol = 0
-}
-
-func (m *Model) commitTokenEdit() {
-	var props []table.TokenProperty
-	for _, line := range m.tokenEditLines {
-		s := string(line)
-		if idx := strings.Index(s, ": "); idx >= 0 {
-			props = append(props, table.TokenProperty{Key: s[:idx], Value: s[idx+2:]})
-		} else if len(s) > 0 {
-			props = append(props, table.TokenProperty{Key: s, Value: ""})
-		}
-	}
-	m.tokenLib.Defs[m.tokenEditIdx].Properties = props
-}
-
-// --- Token menu update ---
-
-func (m Model) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if m.tokenConfirmDelete {
-		switch message.String() {
-		case "y", "enter":
-			if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-				item := m.tokenMenuItems[m.tokenMenuCursor]
-				if item.kind == tmToken {
-					m.deleteToken(item.tokenIdx)
-				} else if item.kind == tmFolder {
-					m.deleteFolder(item.folder)
-				}
-				m.rebuildTokenMenu()
-				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
-					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
-				}
-				if m.tokenMenuCursor < 0 {
-					m.tokenMenuCursor = 0
-				}
-			}
-			m.tokenConfirmDelete = false
-		case "n", "esc":
-			m.tokenConfirmDelete = false
-		}
-		return m, nil
-	}
-	if m.tokenCreateMode || m.tokenFolderMode {
-		return m.updateTokenMenuInput(message)
-	}
-	switch message.String() {
-	case "j", "down":
-		if m.tokenMenuCursor < len(m.tokenMenuItems)-1 {
-			m.tokenMenuCursor++
-		}
-	case "k", "up":
-		if m.tokenMenuCursor > 0 {
-			m.tokenMenuCursor--
-		}
-	case "enter":
-		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-			item := m.tokenMenuItems[m.tokenMenuCursor]
-			if item.kind == tmFolder {
-				m.expandedFolders[item.folder] = !m.expandedFolders[item.folder]
-				m.rebuildTokenMenu()
-				if m.tokenMenuCursor >= len(m.tokenMenuItems) {
-					m.tokenMenuCursor = len(m.tokenMenuItems) - 1
-				}
-			} else if item.kind == tmToken {
-				td := m.tokenLib.Defs[item.tokenIdx]
-				wx := m.cursorX + m.panX
-				wy := m.cursorY + m.panY
-				m.table.TokenPlacements = append(m.table.TokenPlacements, table.TokenPlacement{
-					TokenID: td.ID,
-					X:       wx - 2,
-					Y:       wy - 1,
-					Layer:   m.currentLayer,
-				})
-				m.mode = modeNormal
-			}
-		}
-	case "n":
-		ti := textinput.New()
-		ti.Placeholder = "token name"
-		ti.CharLimit = 64
-		m.tokenNameInput = ti
-		m.tokenCreateMode = true
-		return m, m.tokenNameInput.Focus()
-	case "f":
-		ti := textinput.New()
-		ti.Placeholder = "folder name"
-		ti.CharLimit = 64
-		m.tokenNameInput = ti
-		m.tokenFolderMode = true
-		return m, m.tokenNameInput.Focus()
-	case "e":
-		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-			item := m.tokenMenuItems[m.tokenMenuCursor]
-			if item.kind == tmToken {
-				m.beginTokenEdit(item.tokenIdx)
-				m.mode = modeTokenEdit
-			}
-		}
-	case "d":
-		if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-			m.tokenConfirmDelete = true
-		}
-	case "esc":
-		m.mode = modeNormal
-	}
-	return m, nil
-}
-
-func (m Model) updateTokenMenuInput(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch message.String() {
-	case "enter":
-		name := m.tokenNameInput.Value()
-		if name == "" {
-			m.tokenCreateMode = false
-			m.tokenFolderMode = false
-			return m, nil
-		}
-		if m.tokenCreateMode {
-			// Determine folder from cursor position
-			folder := ""
-			if m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
-				item := m.tokenMenuItems[m.tokenMenuCursor]
-				if item.kind == tmFolder {
-					folder = item.folder
-				} else if item.folder != "" {
-					folder = item.folder
-				}
-			}
-			m.tokenLib.Defs = append(m.tokenLib.Defs, table.TokenDef{
-				ID:     table.NewTokenID(),
-				Folder: folder,
-				Properties: []table.TokenProperty{
-					{Key: "Name", Value: name},
-				},
-			})
-			m.tokenCreateMode = false
-		} else if m.tokenFolderMode {
-			m.tokenLib.Folders = append(m.tokenLib.Folders, name)
-			m.tokenFolderMode = false
-		}
-		m.rebuildTokenMenu()
-		// Move cursor to end to show the newly added item
-		if len(m.tokenMenuItems) > 0 {
-			m.tokenMenuCursor = len(m.tokenMenuItems) - 1
-		}
-		return m, nil
-	case "esc":
-		m.tokenCreateMode = false
-		m.tokenFolderMode = false
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.tokenNameInput, cmd = m.tokenNameInput.Update(message)
-	return m, cmd
-}
-
-// --- Token edit update ---
-
-func (m Model) updateTokenEdit(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	key := message.String()
-	switch key {
-	case "enter":
-		line := m.tokenEditLines[m.tokenEditCurRow]
-		before := make([]rune, m.tokenEditCurCol)
-		copy(before, line[:m.tokenEditCurCol])
-		after := make([]rune, len(line)-m.tokenEditCurCol)
-		copy(after, line[m.tokenEditCurCol:])
-		m.tokenEditLines[m.tokenEditCurRow] = before
-		newLines := make([][]rune, len(m.tokenEditLines)+1)
-		copy(newLines, m.tokenEditLines[:m.tokenEditCurRow+1])
-		newLines[m.tokenEditCurRow+1] = after
-		copy(newLines[m.tokenEditCurRow+2:], m.tokenEditLines[m.tokenEditCurRow+1:])
-		m.tokenEditLines = newLines
-		m.tokenEditCurRow++
-		m.tokenEditCurCol = 0
-	case "backspace":
-		if m.tokenEditCurCol > 0 {
-			line := m.tokenEditLines[m.tokenEditCurRow]
-			m.tokenEditLines[m.tokenEditCurRow] = append(line[:m.tokenEditCurCol-1], line[m.tokenEditCurCol:]...)
-			m.tokenEditCurCol--
-		} else if m.tokenEditCurRow > 0 {
-			prevLine := m.tokenEditLines[m.tokenEditCurRow-1]
-			joinCol := len(prevLine)
-			m.tokenEditLines[m.tokenEditCurRow-1] = append(prevLine, m.tokenEditLines[m.tokenEditCurRow]...)
-			m.tokenEditLines = append(m.tokenEditLines[:m.tokenEditCurRow], m.tokenEditLines[m.tokenEditCurRow+1:]...)
-			m.tokenEditCurRow--
-			m.tokenEditCurCol = joinCol
-		}
-	case "delete":
-		line := m.tokenEditLines[m.tokenEditCurRow]
-		if m.tokenEditCurCol < len(line) {
-			m.tokenEditLines[m.tokenEditCurRow] = append(line[:m.tokenEditCurCol], line[m.tokenEditCurCol+1:]...)
-		} else if m.tokenEditCurRow < len(m.tokenEditLines)-1 {
-			m.tokenEditLines[m.tokenEditCurRow] = append(line, m.tokenEditLines[m.tokenEditCurRow+1]...)
-			m.tokenEditLines = append(m.tokenEditLines[:m.tokenEditCurRow+1], m.tokenEditLines[m.tokenEditCurRow+2:]...)
-		}
-	case "left":
-		if m.tokenEditCurCol > 0 {
-			m.tokenEditCurCol--
-		} else if m.tokenEditCurRow > 0 {
-			m.tokenEditCurRow--
-			m.tokenEditCurCol = len(m.tokenEditLines[m.tokenEditCurRow])
-		}
-	case "right":
-		line := m.tokenEditLines[m.tokenEditCurRow]
-		if m.tokenEditCurCol < len(line) {
-			m.tokenEditCurCol++
-		} else if m.tokenEditCurRow < len(m.tokenEditLines)-1 {
-			m.tokenEditCurRow++
-			m.tokenEditCurCol = 0
-		}
-	case "up":
-		if m.tokenEditCurRow > 0 {
-			m.tokenEditCurRow--
-			if m.tokenEditCurCol > len(m.tokenEditLines[m.tokenEditCurRow]) {
-				m.tokenEditCurCol = len(m.tokenEditLines[m.tokenEditCurRow])
-			}
-		}
-	case "down":
-		if m.tokenEditCurRow < len(m.tokenEditLines)-1 {
-			m.tokenEditCurRow++
-			if m.tokenEditCurCol > len(m.tokenEditLines[m.tokenEditCurRow]) {
-				m.tokenEditCurCol = len(m.tokenEditLines[m.tokenEditCurRow])
-			}
-		}
-	case "ctrl+s":
-		m.commitTokenEdit()
-		m.mode = modeNormal
-		return m, nil
-	case "esc":
-		m.mode = modeNormal
-		return m, nil
-	default:
-		if len(message.Text) > 0 {
-			r := []rune(message.Text)
-			line := m.tokenEditLines[m.tokenEditCurRow]
-			newLine := make([]rune, 0, len(line)+len(r))
-			newLine = append(newLine, line[:m.tokenEditCurCol]...)
-			newLine = append(newLine, r...)
-			newLine = append(newLine, line[m.tokenEditCurCol:]...)
-			m.tokenEditLines[m.tokenEditCurRow] = newLine
-			m.tokenEditCurCol += len(r)
-		}
-	}
-	return m, nil
-}
-
-// --- Token color picker ---
-
-func (m Model) updateTokenColor(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch message.String() {
-	case "j", "down":
-		if m.colorCursor < len(tokenColors)-1 {
-			m.colorCursor++
-		}
-	case "k", "up":
-		if m.colorCursor > 0 {
-			m.colorCursor--
-		}
-	case "enter":
-		if m.colorOverlayPositions != nil {
-			lc, ok := m.layerColors[m.currentLayer]
-			if !ok {
-				lc = make(map[[2]int]string)
-				m.layerColors[m.currentLayer] = lc
-			}
-			for _, pos := range m.colorOverlayPositions {
-				lc[pos] = tokenColors[m.colorCursor].color
-			}
-			m.colorOverlayPositions = nil
-		} else if m.colorTokenIdx >= 0 && m.colorTokenIdx < len(m.table.TokenPlacements) {
-			m.table.TokenPlacements[m.colorTokenIdx].Color = tokenColors[m.colorCursor].color
-		}
-		m.colorTokenIdx = -1
-		m.mode = modeNormal
-	case "esc":
-		m.colorTokenIdx = -1
-		m.colorOverlayPositions = nil
-		m.mode = modeNormal
-	}
-	return m, nil
-}
-
-// --- Token views ---
-
-func (m Model) viewTokenColor() string {
+func (m TableViewModel) viewTokenColor() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
@@ -2062,7 +1824,7 @@ func (m Model) viewTokenColor() string {
 	return sb.String()
 }
 
-func (m Model) viewTokenMenu() string {
+func (m TableViewModel) viewTokenMenu() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
@@ -2128,7 +1890,7 @@ func (m Model) viewTokenMenu() string {
 	return sb.String()
 }
 
-func (m Model) viewTokenEdit() string {
+func (m TableViewModel) viewTokenEdit() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
@@ -2144,25 +1906,6 @@ func (m Model) viewTokenEdit() string {
 		sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Edit Token")))
 	}
 
-	for row, line := range m.tokenEditLines {
-		sb.WriteString("  ")
-		for col, ch := range line {
-			s := string(ch)
-			if row == m.tokenEditCurRow && col == m.tokenEditCurCol {
-				sb.WriteString(styles.CursorStyle.Render(s))
-			} else {
-				sb.WriteString(s)
-			}
-		}
-		// Show cursor at end of line
-		if row == m.tokenEditCurRow && m.tokenEditCurCol == len(line) {
-			sb.WriteString(styles.CursorStyle.Render(" "))
-		}
-		sb.WriteByte('\n')
-	}
+	sb.WriteString(m.tokenEditor.View())
 	return sb.String()
 }
-
-// syncTokensToTable updates the table before saving, ensuring token placements
-// are included. Called from syncOverlayToTable is sufficient since JSON handles
-// TokenDefs/TokenPlacements automatically.

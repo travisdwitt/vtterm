@@ -1,4 +1,4 @@
-package mainmenu
+package views
 
 import (
 	tea "charm.land/bubbletea/v2"
@@ -6,21 +6,21 @@ import (
 	"github.com/traviswitt/vtterm/internal/styles"
 )
 
-var choices = []string{"New Table", "Load Table", "Tokens", "Exit"}
+var mainMenuChoices = []string{"New Table", "Load Table", "Tokens", "Exit"}
 
-type Model struct {
+type MainMenuModel struct {
 	cursor int
 }
 
-func New() Model {
-	return Model{}
+func NewMainMenu() MainMenuModel {
+	return MainMenuModel{}
 }
 
-func (m Model) Init() tea.Cmd {
+func (m MainMenuModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+func (m MainMenuModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.KeyPressMsg:
 		switch message.String() {
@@ -31,7 +31,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor < len(choices)-1 {
+			if m.cursor < len(mainMenuChoices)-1 {
 				m.cursor++
 			}
 		case "enter":
@@ -50,7 +50,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() tea.View {
+func (m MainMenuModel) View() tea.View {
 	logo := "        __   __\n" +
 		".--.--.|  |_|  |_.-----.----.--------.\n" +
 		"|  |  ||   _|   _|  -__|   _|        |\n" +
@@ -58,7 +58,7 @@ func (m Model) View() tea.View {
 	s := styles.Title.Render(logo) + "\n"
 	s += styles.Subtle.Render("A virtual tabletop in your terminal") + "\n\n"
 
-	for i, choice := range choices {
+	for i, choice := range mainMenuChoices {
 		if m.cursor == i {
 			s += styles.Highlight.Render("[>] "+choice) + "\n"
 		} else {

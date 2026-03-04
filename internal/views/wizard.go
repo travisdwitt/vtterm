@@ -1,4 +1,4 @@
-package wizard
+package views
 
 import (
 	"fmt"
@@ -12,17 +12,17 @@ import (
 	"github.com/traviswitt/vtterm/internal/table"
 )
 
-type step int
+type wizardStep int
 
 const (
-	stepGridType step = iota
+	stepGridType wizardStep = iota
 	stepHeight
 	stepWidth
 	stepDone
 )
 
-type Model struct {
-	step        step
+type WizardModel struct {
+	step        wizardStep
 	gridType    table.GridType
 	height      int
 	width       int
@@ -32,24 +32,24 @@ type Model struct {
 	gridCursor  int
 }
 
-func New() Model {
+func NewWizard() WizardModel {
 	ti := textinput.New()
 	ti.Placeholder = "e.g. 10"
 	ti.CharLimit = 3
 	ti.Validate = validateNumeric
 
-	return Model{
+	return WizardModel{
 		step:        stepGridType,
 		textInput:   ti,
 		gridChoices: []table.GridType{table.GridTypeGrid, table.GridTypeHex, table.GridTypeNone},
 	}
 }
 
-func (m Model) Init() tea.Cmd {
+func (m WizardModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+func (m WizardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.KeyPressMsg:
 		switch message.String() {
@@ -78,7 +78,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateGridType(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateGridType(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "up", "k":
 		if m.gridCursor > 0 {
@@ -101,7 +101,7 @@ func (m Model) updateGridType(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) updateDimension(message tea.KeyPressMsg, next step) (tea.Model, tea.Cmd) {
+func (m WizardModel) updateDimension(message tea.KeyPressMsg, next wizardStep) (tea.Model, tea.Cmd) {
 	if message.String() != "enter" {
 		var cmd tea.Cmd
 		m.textInput, cmd = m.textInput.Update(message)
@@ -131,7 +131,7 @@ func (m Model) updateDimension(message tea.KeyPressMsg, next step) (tea.Model, t
 	return m, nil
 }
 
-func (m Model) finish() tea.Cmd {
+func (m WizardModel) finish() tea.Cmd {
 	t := table.Table{
 		Name:      "Untitled",
 		GridType:  m.gridType,
@@ -143,7 +143,7 @@ func (m Model) finish() tea.Cmd {
 	return func() tea.Msg { return msg.GoToTableView{Table: t} }
 }
 
-func (m Model) View() tea.View {
+func (m WizardModel) View() tea.View {
 	s := styles.Title.Render("New Table") + "\n\n"
 
 	switch m.step {

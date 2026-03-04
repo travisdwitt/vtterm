@@ -17,16 +17,8 @@ var (
 
 	Error = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 
-	OverlayStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
-
 	TokenStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	TokenDisabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 
 	CursorStyle = lipgloss.NewStyle().Reverse(true)
-
-	DialogBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("170")).
-			Padding(1, 2).
-			Width(40)
 )

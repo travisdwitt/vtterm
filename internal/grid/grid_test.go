@@ -1,7 +1,6 @@
 package grid
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -15,7 +14,6 @@ func TestRenderSquare(t *testing.T) {
 
 func TestRenderFlatHex(t *testing.T) {
 	out := RenderFlatHex(4, 3)
-	fmt.Print(out)
 	if !strings.Contains(out, "+---+") {
 		t.Error("expected flat hex edge")
 	}
