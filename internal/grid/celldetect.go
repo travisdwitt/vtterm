@@ -2,13 +2,13 @@ package grid
 
 import "math"
 
-// Exported geometry constants derived from unexported cellWidth=8, cellHeight=3.
+// Exported geometry constants derived from unexported cellWidth=3, cellHeight=1.
 const (
-	SquareCellW = 9  // cellWidth + 1 border
-	SquareCellH = 4  // cellHeight + 1 border
+	SquareCellW = 4 // cellWidth + 1 border
+	SquareCellH = 2 // cellHeight + 1 border
 
-	FlatHexSpacingX = 10
-	FlatHexSpacingY = 6
+	FlatHexSpacingX = 6
+	FlatHexSpacingY = 4
 )
 
 // CenterFunc returns the world-space center of cell (col, row).
@@ -33,14 +33,14 @@ func DetectSquareCell(wx, wy, cols, rows int) (col, row int, ok bool) {
 
 // SquareCellCenter returns the world-space center of square cell (col, row).
 func SquareCellCenter(col, row int) (x, y int) {
-	return col*SquareCellW + 4, row*SquareCellH + 2
+	return col*SquareCellW + SquareCellW/2, row*SquareCellH + SquareCellH/2
 }
 
 // DetectFlatHexCell returns the flat-top hex cell at world position (wx, wy).
 func DetectFlatHexCell(wx, wy, cols, rows int) (col, row int, ok bool) {
 	// Estimate column and row from spacing.
-	estCol := int(math.Round(float64(wx-7) / float64(FlatHexSpacingX)))
-	baseRow := float64(wy-3) / float64(FlatHexSpacingY)
+	estCol := int(math.Round(float64(wx-4) / float64(FlatHexSpacingX)))
+	baseRow := float64(wy-2) / float64(FlatHexSpacingY)
 	estRow := int(math.Round(baseRow))
 
 	bestDist := math.MaxFloat64
@@ -73,7 +73,7 @@ func DetectFlatHexCell(wx, wy, cols, rows int) (col, row int, ok bool) {
 	px, py := FlatHexCellCenter(bestCol, bestRow)
 	dx := abs(wx - px)
 	dy := abs(wy - py)
-	if dx > 4 || dy > 2 {
+	if dx > 4 || dy > 3 {
 		return 0, 0, false
 	}
 
@@ -82,11 +82,11 @@ func DetectFlatHexCell(wx, wy, cols, rows int) (col, row int, ok bool) {
 
 // FlatHexCellCenter returns the world-space center of flat-top hex cell (col, row).
 func FlatHexCellCenter(col, row int) (x, y int) {
-	y = row*FlatHexSpacingY + 3
+	y = row*FlatHexSpacingY + 2
 	if col%2 == 1 {
-		y += 3
+		y += FlatHexSpacingY / 2
 	}
-	return 7 + col*FlatHexSpacingX, y
+	return 4 + col*FlatHexSpacingX, y
 }
 
 // NearestCell finds the cell whose center is closest to world position (wx, wy).

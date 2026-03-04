@@ -3,8 +3,8 @@ package grid
 import "strings"
 
 const (
-	cellWidth  = 8
-	cellHeight = 3
+	cellWidth  = 3 // matches token label width (5 total with +…+ borders)
+	cellHeight = 1 // matches token label height (3 total with +…+ borders)
 )
 
 func RenderSquare(cols, rows int) string {

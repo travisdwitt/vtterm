@@ -19,6 +19,9 @@ var (
 
 	OverlayStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
 
+	TokenStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	TokenDisabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
 	CursorStyle = lipgloss.NewStyle().Reverse(true)
 
 	DialogBox = lipgloss.NewStyle().

@@ -3,17 +3,17 @@ package grid
 import "strings"
 
 func RenderFlatHex(cols, rows int) string {
-	bufW := cols*10 + 4
-	bufH := rows*6 + 4
+	bufW := cols*6 + 9
+	bufH := rows*4 + 7
 
 	buf := newBuffer(bufW, bufH)
 
 	for row := 0; row < rows; row++ {
 		for col := 0; col < cols; col++ {
-			tx := 3 + col*10
-			ty := row * 6
+			tx := col * 6
+			ty := row * 4
 			if col%2 == 1 {
-				ty += 3
+				ty += 2
 			}
 			stampFlat(buf, tx, ty)
 		}
@@ -22,31 +22,35 @@ func RenderFlatHex(cols, rows int) string {
 	return buf.String()
 }
 
+// stampFlat draws a single flat-top hex:
+//
+//	  +---+
+//	 /     \
+//	+       +
+//	 \     /
+//	  +---+
 func stampFlat(buf *charBuffer, tx, ty int) {
-	buf.set(tx, ty, '+')
-	for i := 1; i <= 6; i++ {
-		buf.set(tx+i, ty, '-')
-	}
-	buf.set(tx+7, ty, '+')
-
-	buf.set(tx-1, ty+1, '/')
-	buf.set(tx+8, ty+1, '\\')
-	buf.set(tx-2, ty+2, '/')
-	buf.set(tx+9, ty+2, '\\')
-
-	buf.set(tx-3, ty+3, '+')
-	buf.set(tx+10, ty+3, '+')
-
-	buf.set(tx-2, ty+4, '\\')
-	buf.set(tx+9, ty+4, '/')
-	buf.set(tx-1, ty+5, '\\')
-	buf.set(tx+8, ty+5, '/')
-
-	buf.set(tx, ty+6, '+')
-	for i := 1; i <= 6; i++ {
-		buf.set(tx+i, ty+6, '-')
-	}
-	buf.set(tx+7, ty+6, '+')
+	// Row 0:   +---+
+	buf.set(tx+2, ty, '+')
+	buf.set(tx+3, ty, '-')
+	buf.set(tx+4, ty, '-')
+	buf.set(tx+5, ty, '-')
+	buf.set(tx+6, ty, '+')
+	// Row 1:  /     \
+	buf.set(tx+1, ty+1, '/')
+	buf.set(tx+7, ty+1, '\\')
+	// Row 2: +       +
+	buf.set(tx, ty+2, '+')
+	buf.set(tx+8, ty+2, '+')
+	// Row 3:  \     /
+	buf.set(tx+1, ty+3, '\\')
+	buf.set(tx+7, ty+3, '/')
+	// Row 4:   +---+
+	buf.set(tx+2, ty+4, '+')
+	buf.set(tx+3, ty+4, '-')
+	buf.set(tx+4, ty+4, '-')
+	buf.set(tx+5, ty+4, '-')
+	buf.set(tx+6, ty+4, '+')
 }
 
 type charBuffer struct {

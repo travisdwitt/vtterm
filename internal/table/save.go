@@ -62,6 +62,38 @@ func ListSaved() ([]string, error) {
 	return files, nil
 }
 
+func DeleteSaved(name string) error {
+	return os.Remove(filepath.Join(SaveDir(), name))
+}
+
+func SaveTokenLibrary(lib *TokenLibrary) error {
+	dir := SaveDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating save directory: %w", err)
+	}
+	data, err := json.MarshalIndent(lib, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling token library: %w", err)
+	}
+	return os.WriteFile(filepath.Join(dir, "tokens.json"), data, 0o644)
+}
+
+func LoadTokenLibrary() (*TokenLibrary, error) {
+	path := filepath.Join(SaveDir(), "tokens.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &TokenLibrary{}, nil
+		}
+		return nil, err
+	}
+	var lib TokenLibrary
+	if err := json.Unmarshal(data, &lib); err != nil {
+		return nil, err
+	}
+	return &lib, nil
+}
+
 var nonAlpha = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 
 func sanitize(name string) string {

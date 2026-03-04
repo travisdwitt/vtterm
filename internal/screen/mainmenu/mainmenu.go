@@ -6,7 +6,7 @@ import (
 	"github.com/traviswitt/vtterm/internal/styles"
 )
 
-var choices = []string{"New Table", "Load Table", "Exit"}
+var choices = []string{"New Table", "Load Table", "Tokens", "Exit"}
 
 type Model struct {
 	cursor int
@@ -41,6 +41,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			case 1:
 				return m, func() tea.Msg { return msg.GoToLoad{} }
 			case 2:
+				return m, func() tea.Msg { return msg.GoToTokens{} }
+			case 3:
 				return m, tea.Quit
 			}
 		}

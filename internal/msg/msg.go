@@ -11,3 +11,5 @@ type GoToTableView struct {
 type GoToMainMenu struct{}
 
 type GoToLoad struct{}
+
+type GoToTokens struct{}
