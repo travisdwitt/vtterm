@@ -20,6 +20,7 @@ type OverlayChar struct {
 	R     string `json:"r"`
 	Layer int    `json:"layer,omitempty"`
 	Color string `json:"color,omitempty"`
+	Group string `json:"group,omitempty"`
 }
 
 type TokenProperty struct {

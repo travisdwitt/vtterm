@@ -32,6 +32,17 @@ const (
 	modeTokenColor         // picking token color
 )
 
+var fillRunes = []rune{'░', '▒', '▓', '█'}
+
+func isFillRune(r rune) bool {
+	for _, fr := range fillRunes {
+		if r == fr {
+			return true
+		}
+	}
+	return false
+}
+
 var tokenColors = []struct {
 	name  string
 	color string
@@ -72,6 +83,7 @@ type TableViewModel struct {
 	prevMode     inputMode
 	layers       map[int]map[[2]int]rune
 	layerColors  map[int]map[[2]int]string
+	layerGroups  map[int]map[[2]int]string
 	currentLayer int
 	pending      map[[2]int]rune
 	lineStarted  bool
@@ -88,7 +100,9 @@ type TableViewModel struct {
 
 	moving           map[[2]int]rune
 	movingColors     map[[2]int]string
+	movingGroups     map[[2]int]string
 	moveOriginColors map[[2]int]string
+	moveOriginGroups map[[2]int]string
 	moveOrigin       map[[2]int]rune
 	moveOffsetX      int
 	moveOffsetY      int
@@ -112,6 +126,7 @@ type TableViewModel struct {
 	tokenMoveOriginX     int
 	tokenMoveOriginY     int
 	tokenMoveOriginLayer int
+	moveSnap             bool
 
 	inspectTokenIdx int
 	deleteTokenIdx  int
@@ -119,6 +134,11 @@ type TableViewModel struct {
 	colorTokenIdx         int
 	colorOverlayPositions [][2]int
 	colorCursor           int
+	fillPositions         [][2]int
+	fillBoundaryGroup     string
+	fillOpacity           int // 0=░ 1=▒ 2=▓ 3=█
+	removeFillGroup       string
+	confirmDeleteShape    bool
 
 	tokenNameInput textinput.Model
 }
@@ -133,6 +153,7 @@ func NewTableView(t table.Table, lib *table.TokenLibrary, w, h int) TableViewMod
 	m := TableViewModel{table: t, tokenLib: lib, width: w, height: h}
 	m.layers = make(map[int]map[[2]int]rune)
 	m.layerColors = make(map[int]map[[2]int]string)
+	m.layerGroups = make(map[int]map[[2]int]string)
 	m.movingTokenIdx = -1
 	m.inspectTokenIdx = -1
 	m.deleteTokenIdx = -1
@@ -164,10 +185,14 @@ func (m *TableViewModel) syncOverlayToTable() {
 	chars := make([]table.OverlayChar, 0, total)
 	for layer, ol := range m.layers {
 		lc := m.layerColors[layer]
+		lg := m.layerGroups[layer]
 		for k, v := range ol {
 			oc := table.OverlayChar{X: k[0], Y: k[1], R: string(v), Layer: layer}
 			if lc != nil {
 				oc.Color = lc[k]
+			}
+			if lg != nil {
+				oc.Group = lg[k]
 			}
 			chars = append(chars, oc)
 		}
@@ -198,6 +223,14 @@ func (m *TableViewModel) loadOverlayFromTable() {
 				m.layerColors[oc.Layer] = lc
 			}
 			lc[pos] = oc.Color
+		}
+		if oc.Group != "" {
+			lg, ok := m.layerGroups[oc.Layer]
+			if !ok {
+				lg = make(map[[2]int]string)
+				m.layerGroups[oc.Layer] = lg
+			}
+			lg[pos] = oc.Group
 		}
 	}
 }
@@ -249,6 +282,12 @@ func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.deleteTokenIdx >= 0 {
 			return m.updateDeleteTokenDialog(message)
+		}
+		if m.removeFillGroup != "" {
+			return m.updateRemoveFillDialog(message)
+		}
+		if m.confirmDeleteShape {
+			return m.updateDeleteShapeDialog(message)
 		}
 		switch m.mode {
 		case modeSaveName:
@@ -501,6 +540,44 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 			}
 		}
 
+	case "g":
+		if hasGrid {
+			wx := m.cursorX + m.panX
+			wy := m.cursorY + m.panY
+			sel := m.floodSelectOverlay(wx, wy)
+			if len(sel) > 0 {
+				m.beginShapeMove(sel)
+			}
+		}
+	case "f":
+		if hasGrid {
+			wx := m.cursorX + m.panX
+			wy := m.cursorY + m.panY
+			// Check if cursor is on a fill char — offer to remove fill.
+			ol := m.layers[m.currentLayer]
+			if ol != nil {
+				if r, ok := ol[[2]int{wx, wy}]; ok && isFillRune(r) {
+					lg := m.layerGroups[m.currentLayer]
+					if lg != nil {
+						if gid, ok := lg[[2]int{wx, wy}]; ok && gid != "" {
+							m.removeFillGroup = gid
+						}
+					}
+					break
+				}
+			}
+			// Otherwise start a new fill.
+			positions, boundaryGroup := m.floodFillInterior(wx, wy)
+			if len(positions) > 0 {
+				m.fillPositions = positions
+				m.fillBoundaryGroup = boundaryGroup
+				m.fillOpacity = 3 // default to solid (█)
+				m.colorTokenIdx = -1
+				m.colorOverlayPositions = nil
+				m.colorCursor = 0
+				m.mode = modeTokenColor
+			}
+		}
 	case "tab":
 		if hasGrid {
 			m.handleTab(false)
@@ -554,32 +631,9 @@ func (m TableViewModel) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.
 				m.tokenMoveOffsetY = 0
 				m.mode = modeMove
 			} else {
-				ol := m.activeOverlay()
-				if _, ok := ol[[2]int{wx, wy}]; ok {
-					m.moving = m.floodSelectOverlay(wx, wy)
-					lc := m.layerColors[m.currentLayer]
-					m.movingColors = make(map[[2]int]string, len(m.moving))
-					for k := range m.moving {
-						delete(ol, k)
-						if lc != nil {
-							if c, ok := lc[k]; ok {
-								m.movingColors[k] = c
-								delete(lc, k)
-							}
-						}
-					}
-					m.moveOrigin = make(map[[2]int]rune, len(m.moving))
-					m.moveOriginColors = make(map[[2]int]string, len(m.movingColors))
-					for k, v := range m.moving {
-						m.moveOrigin[k] = v
-					}
-					for k, v := range m.movingColors {
-						m.moveOriginColors[k] = v
-					}
-					m.moveOffsetX = 0
-					m.moveOffsetY = 0
-					m.moveSourceLayer = m.currentLayer
-					m.mode = modeMove
+				sel := m.groupSelectOverlay(wx, wy)
+				if len(sel) > 0 {
+					m.beginShapeMove(sel)
 				} else {
 					m.mode = m.prevMode
 				}
@@ -639,17 +693,27 @@ func (m TableViewModel) updateLayer(message tea.KeyPressMsg) (tea.Model, tea.Cmd
 					lc = make(map[[2]int]string)
 					m.layerColors[m.currentLayer] = lc
 				}
+				lg, ok2 := m.layerGroups[m.currentLayer]
+				if !ok2 {
+					lg = make(map[[2]int]string)
+					m.layerGroups[m.currentLayer] = lg
+				}
 				for k, v := range m.moving {
 					newPos := [2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}
 					ol[newPos] = v
 					if c, ok := m.movingColors[k]; ok {
 						lc[newPos] = c
 					}
+					if g, ok := m.movingGroups[k]; ok {
+						lg[newPos] = g
+					}
 				}
 				m.moving = nil
 				m.movingColors = nil
+				m.movingGroups = nil
 				m.moveOrigin = nil
 				m.moveOriginColors = nil
+				m.moveOriginGroups = nil
 				m.mode = modeNormal
 			}
 		} else {
@@ -850,6 +914,8 @@ func (m TableViewModel) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 	case "m":
 		m.prevMode = modeMove
 		m.mode = modeMPending
+	case "D":
+		m.confirmDeleteShape = true
 	case "enter":
 		ol := m.activeOverlay()
 		lc, ok := m.layerColors[m.currentLayer]
@@ -857,17 +923,27 @@ func (m TableViewModel) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			lc = make(map[[2]int]string)
 			m.layerColors[m.currentLayer] = lc
 		}
+		lg, ok2 := m.layerGroups[m.currentLayer]
+		if !ok2 {
+			lg = make(map[[2]int]string)
+			m.layerGroups[m.currentLayer] = lg
+		}
 		for k, v := range m.moving {
 			newPos := [2]int{k[0] + m.moveOffsetX, k[1] + m.moveOffsetY}
 			ol[newPos] = v
 			if c, ok := m.movingColors[k]; ok {
 				lc[newPos] = c
 			}
+			if g, ok := m.movingGroups[k]; ok {
+				lg[newPos] = g
+			}
 		}
 		m.moving = nil
 		m.movingColors = nil
+		m.movingGroups = nil
 		m.moveOrigin = nil
 		m.moveOriginColors = nil
+		m.moveOriginGroups = nil
 		m.mode = modeNormal
 	case "esc":
 		srcOl, ok := m.layers[m.moveSourceLayer]
@@ -888,10 +964,22 @@ func (m TableViewModel) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 				srcLc[k] = v
 			}
 		}
+		if len(m.moveOriginGroups) > 0 {
+			srcLg, ok := m.layerGroups[m.moveSourceLayer]
+			if !ok {
+				srcLg = make(map[[2]int]string)
+				m.layerGroups[m.moveSourceLayer] = srcLg
+			}
+			for k, v := range m.moveOriginGroups {
+				srcLg[k] = v
+			}
+		}
 		m.moving = nil
 		m.movingColors = nil
+		m.movingGroups = nil
 		m.moveOrigin = nil
 		m.moveOriginColors = nil
+		m.moveOriginGroups = nil
 		m.mode = modeNormal
 	}
 	return m, nil
@@ -899,31 +987,102 @@ func (m TableViewModel) updateMove(message tea.KeyPressMsg) (tea.Model, tea.Cmd)
 
 func (m TableViewModel) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
+	case "tab":
+		m.moveSnap = !m.moveSnap
+		if m.moveSnap {
+			// Snap token to nearest cell center immediately.
+			m.snapTokenToCell()
+		}
 	case "h", "left":
-		m.tokenMoveOffsetX--
+		if m.moveSnap {
+			m.moveTokenSnap(-1, 0)
+		} else {
+			m.tokenMoveOffsetX--
+		}
 	case "l", "right":
-		m.tokenMoveOffsetX++
+		if m.moveSnap {
+			m.moveTokenSnap(1, 0)
+		} else {
+			m.tokenMoveOffsetX++
+		}
 	case "k", "up":
-		m.tokenMoveOffsetY--
+		if m.moveSnap {
+			m.moveTokenSnap(0, -1)
+		} else {
+			m.tokenMoveOffsetY--
+		}
 	case "j", "down":
-		m.tokenMoveOffsetY++
+		if m.moveSnap {
+			m.moveTokenSnap(0, 1)
+		} else {
+			m.tokenMoveOffsetY++
+		}
 	case "m":
 		m.prevMode = modeMove
 		m.mode = modeMPending
+	case "D":
+		m.confirmDeleteShape = true
 	case "enter":
 		m.table.TokenPlacements[m.movingTokenIdx].X = m.tokenMoveOriginX + m.tokenMoveOffsetX
 		m.table.TokenPlacements[m.movingTokenIdx].Y = m.tokenMoveOriginY + m.tokenMoveOffsetY
 		m.table.TokenPlacements[m.movingTokenIdx].Layer = m.currentLayer
 		m.movingTokenIdx = -1
+		m.moveSnap = false
 		m.mode = modeNormal
 	case "esc":
 		m.table.TokenPlacements[m.movingTokenIdx].X = m.tokenMoveOriginX
 		m.table.TokenPlacements[m.movingTokenIdx].Y = m.tokenMoveOriginY
 		m.table.TokenPlacements[m.movingTokenIdx].Layer = m.tokenMoveOriginLayer
 		m.movingTokenIdx = -1
+		m.moveSnap = false
 		m.mode = modeNormal
 	}
 	return m, nil
+}
+
+// snapTokenToCell snaps the token to the center of the nearest grid cell.
+func (m *TableViewModel) snapTokenToCell() {
+	cols, rows := m.table.Width, m.table.Height
+	if cols == 0 || rows == 0 {
+		return
+	}
+	cfn := m.centerFunc()
+	// Token center in world space: origin + offset + half token size (token is 5x3).
+	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + 2
+	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + 1
+	col, row := grid.NearestCell(tcx, tcy, cols, rows, cfn)
+	cx, cy := cfn(col, row)
+	// Set offset so token center lands on cell center.
+	m.tokenMoveOffsetX = cx - 2 - m.tokenMoveOriginX
+	m.tokenMoveOffsetY = cy - 1 - m.tokenMoveOriginY
+}
+
+// moveTokenSnap moves the token to the adjacent cell in the given direction.
+func (m *TableViewModel) moveTokenSnap(dcol, drow int) {
+	cols, rows := m.table.Width, m.table.Height
+	if cols == 0 || rows == 0 {
+		return
+	}
+	cfn := m.centerFunc()
+	// Current token center.
+	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + 2
+	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + 1
+	curCol, curRow := grid.NearestCell(tcx, tcy, cols, rows, cfn)
+	newCol := curCol + dcol
+	newRow := curRow + drow
+	if newCol < 0 {
+		newCol = 0
+	} else if newCol >= cols {
+		newCol = cols - 1
+	}
+	if newRow < 0 {
+		newRow = 0
+	} else if newRow >= rows {
+		newRow = rows - 1
+	}
+	cx, cy := cfn(newCol, newRow)
+	m.tokenMoveOffsetX = cx - 2 - m.tokenMoveOriginX
+	m.tokenMoveOffsetY = cy - 1 - m.tokenMoveOriginY
 }
 
 func (m TableViewModel) floodSelectOverlayPositions(startX, startY int) [][2]int {
@@ -958,6 +1117,33 @@ func (m TableViewModel) floodSelectOverlayPositions(startX, startY int) [][2]int
 	return result
 }
 
+// groupSelectOverlay selects all overlay chars on the current layer that share
+// the same group ID as the char at (startX, startY). Falls back to selecting
+// just the single char if no group is assigned.
+func (m *TableViewModel) groupSelectOverlay(startX, startY int) map[[2]int]rune {
+	ol := m.activeOverlay()
+	pos := [2]int{startX, startY}
+	r, ok := ol[pos]
+	if !ok {
+		return nil
+	}
+	lg := m.layerGroups[m.currentLayer]
+	gid := ""
+	if lg != nil {
+		gid = lg[pos]
+	}
+	if gid == "" {
+		return map[[2]int]rune{pos: r}
+	}
+	result := make(map[[2]int]rune)
+	for k, v := range ol {
+		if lg != nil && lg[k] == gid {
+			result[k] = v
+		}
+	}
+	return result
+}
+
 func (m *TableViewModel) floodSelectOverlay(startX, startY int) map[[2]int]rune {
 	positions := m.floodSelectOverlayPositions(startX, startY)
 	ol := m.activeOverlay()
@@ -966,6 +1152,111 @@ func (m *TableViewModel) floodSelectOverlay(startX, startY int) map[[2]int]rune 
 		result[pos] = ol[pos]
 	}
 	return result
+}
+
+// beginShapeMove removes the given overlay chars from the layer and sets up
+// the move state (moving, movingColors, movingGroups, origins, etc.).
+func (m *TableViewModel) beginShapeMove(sel map[[2]int]rune) {
+	ol := m.activeOverlay()
+	lc := m.layerColors[m.currentLayer]
+	lg := m.layerGroups[m.currentLayer]
+	m.moving = sel
+	m.movingColors = make(map[[2]int]string, len(sel))
+	m.movingGroups = make(map[[2]int]string, len(sel))
+	for k := range sel {
+		delete(ol, k)
+		if lc != nil {
+			if c, ok := lc[k]; ok {
+				m.movingColors[k] = c
+				delete(lc, k)
+			}
+		}
+		if lg != nil {
+			if g, ok := lg[k]; ok {
+				m.movingGroups[k] = g
+				delete(lg, k)
+			}
+		}
+	}
+	m.moveOrigin = make(map[[2]int]rune, len(sel))
+	m.moveOriginColors = make(map[[2]int]string, len(m.movingColors))
+	m.moveOriginGroups = make(map[[2]int]string, len(m.movingGroups))
+	for k, v := range sel {
+		m.moveOrigin[k] = v
+	}
+	for k, v := range m.movingColors {
+		m.moveOriginColors[k] = v
+	}
+	for k, v := range m.movingGroups {
+		m.moveOriginGroups[k] = v
+	}
+	m.moveOffsetX = 0
+	m.moveOffsetY = 0
+	m.moveSourceLayer = m.currentLayer
+	m.mode = modeMove
+}
+
+// floodFillInterior returns positions of empty cells reachable from (startX, startY),
+// bounded by overlay characters. Also returns the group ID of the boundary shape
+// (if any). Returns nil if the start is on an overlay char or if the fill area
+// is unbounded (exceeds maxFill cells).
+func (m *TableViewModel) floodFillInterior(startX, startY int) (positions [][2]int, boundaryGroup string) {
+	ol := m.layers[m.currentLayer]
+	if ol == nil {
+		return nil, ""
+	}
+	start := [2]int{startX, startY}
+	// Don't fill if starting on an existing overlay char.
+	if _, ok := ol[start]; ok {
+		return nil, ""
+	}
+
+	const maxFill = 10000
+	// Compute grid pixel bounds for the boundary.
+	maxWX, maxWY := 0, 0
+	if len(m.gridLines) > 0 {
+		maxWY = len(m.gridLines)
+		maxWX = len([]rune(m.gridLines[0]))
+	}
+
+	lg := m.layerGroups[m.currentLayer]
+
+	var result [][2]int
+	visited := make(map[[2]int]bool)
+	queue := [][2]int{start}
+	visited[start] = true
+
+	for len(queue) > 0 {
+		pos := queue[0]
+		queue = queue[1:]
+
+		// Out of grid bounds means the fill is unbounded.
+		if pos[0] < 0 || pos[1] < 0 || pos[0] >= maxWX || pos[1] >= maxWY {
+			return nil, ""
+		}
+		// Stop at overlay chars (they are the boundary).
+		if _, ok := ol[pos]; ok {
+			// Capture boundary group from first boundary char we hit.
+			if boundaryGroup == "" && lg != nil {
+				boundaryGroup = lg[pos]
+			}
+			continue
+		}
+
+		result = append(result, pos)
+		if len(result) > maxFill {
+			return nil, ""
+		}
+
+		for _, d := range [][2]int{{-1, 0}, {1, 0}, {0, -1}, {0, 1}} {
+			next := [2]int{pos[0] + d[0], pos[1] + d[1]}
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return result, boundaryGroup
 }
 
 func (m *TableViewModel) depositLineChar(dx, dy int) {
@@ -1047,8 +1338,15 @@ func (m *TableViewModel) rebuildBoxPending() {
 
 func (m *TableViewModel) commitPending() {
 	ol := m.activeOverlay()
+	gid := table.NewTokenID()
+	lg, ok := m.layerGroups[m.currentLayer]
+	if !ok {
+		lg = make(map[[2]int]string)
+		m.layerGroups[m.currentLayer] = lg
+	}
 	for k, v := range m.pending {
 		ol[k] = v
+		lg[k] = gid
 	}
 	m.pending = nil
 }
@@ -1194,6 +1492,80 @@ func (m TableViewModel) updateDeleteTokenDialog(message tea.KeyPressMsg) (tea.Mo
 		m.deleteTokenIdx = -1
 	}
 	return m, nil
+}
+
+func (m TableViewModel) updateRemoveFillDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "y", "enter":
+		ol := m.activeOverlay()
+		lc := m.layerColors[m.currentLayer]
+		lg := m.layerGroups[m.currentLayer]
+		for pos, r := range ol {
+			if isFillRune(r) && lg != nil && lg[pos] == m.removeFillGroup {
+				delete(ol, pos)
+				if lc != nil {
+					delete(lc, pos)
+				}
+				delete(lg, pos)
+			}
+		}
+		m.removeFillGroup = ""
+	case "n", "esc":
+		m.removeFillGroup = ""
+	}
+	return m, nil
+}
+
+func (m TableViewModel) viewRemoveFillDialog() string {
+	s := fmt.Sprintf("\n\n%s\n\n", styles.Title.Render("Remove Fill?"))
+	s += "  Remove the fill color from this shape?\n\n"
+	s += styles.Subtle.Render("  y/enter: yes  n/esc: no")
+	return s
+}
+
+func (m TableViewModel) updateDeleteShapeDialog(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "y", "enter":
+		m.confirmDeleteShape = false
+		if m.movingTokenIdx >= 0 {
+			// Delete the token placement.
+			idx := m.movingTokenIdx
+			m.table.TokenPlacements = append(
+				m.table.TokenPlacements[:idx],
+				m.table.TokenPlacements[idx+1:]...,
+			)
+			if m.inspectTokenIdx == idx {
+				m.inspectTokenIdx = -1
+			} else if m.inspectTokenIdx > idx {
+				m.inspectTokenIdx--
+			}
+			m.movingTokenIdx = -1
+			m.moveSnap = false
+		} else {
+			// Discard the moving overlay chars (don't restore origins).
+			m.moving = nil
+			m.movingColors = nil
+			m.movingGroups = nil
+			m.moveOrigin = nil
+			m.moveOriginColors = nil
+			m.moveOriginGroups = nil
+		}
+		m.mode = modeNormal
+	case "n", "esc":
+		m.confirmDeleteShape = false
+	}
+	return m, nil
+}
+
+func (m TableViewModel) viewDeleteShapeDialog() string {
+	label := "shape"
+	if m.movingTokenIdx >= 0 {
+		label = "token"
+	}
+	s := fmt.Sprintf("\n\n%s\n\n", styles.Title.Render("Delete?"))
+	s += fmt.Sprintf("  Delete this %s?\n\n", label)
+	s += styles.Subtle.Render("  y/enter: yes  n/esc: no")
+	return s
 }
 
 func tvSaveCmd(t table.Table) tea.Cmd {
@@ -1395,8 +1767,40 @@ func (m TableViewModel) updateTokenColor(message tea.KeyPressMsg) (tea.Model, te
 		if m.colorCursor > 0 {
 			m.colorCursor--
 		}
+	case "h", "left":
+		if m.fillPositions != nil && m.fillOpacity > 0 {
+			m.fillOpacity--
+		}
+	case "l", "right":
+		if m.fillPositions != nil && m.fillOpacity < len(fillRunes)-1 {
+			m.fillOpacity++
+		}
 	case "enter":
-		if m.colorOverlayPositions != nil {
+		if m.fillPositions != nil {
+			ol := m.activeOverlay()
+			lc, ok := m.layerColors[m.currentLayer]
+			if !ok {
+				lc = make(map[[2]int]string)
+				m.layerColors[m.currentLayer] = lc
+			}
+			lg, ok2 := m.layerGroups[m.currentLayer]
+			if !ok2 {
+				lg = make(map[[2]int]string)
+				m.layerGroups[m.currentLayer] = lg
+			}
+			// Use the boundary shape's group so fill moves with the shape.
+			gid := m.fillBoundaryGroup
+			if gid == "" {
+				gid = table.NewTokenID()
+			}
+			for _, pos := range m.fillPositions {
+				ol[pos] = fillRunes[m.fillOpacity]
+				lc[pos] = tokenColors[m.colorCursor].color
+				lg[pos] = gid
+			}
+			m.fillPositions = nil
+			m.fillBoundaryGroup = ""
+		} else if m.colorOverlayPositions != nil {
 			lc, ok := m.layerColors[m.currentLayer]
 			if !ok {
 				lc = make(map[[2]int]string)
@@ -1414,6 +1818,8 @@ func (m TableViewModel) updateTokenColor(message tea.KeyPressMsg) (tea.Model, te
 	case "esc":
 		m.colorTokenIdx = -1
 		m.colorOverlayPositions = nil
+		m.fillPositions = nil
+		m.fillBoundaryGroup = ""
 		m.mode = modeNormal
 	}
 	return m, nil
@@ -1439,6 +1845,12 @@ func (m TableViewModel) View() tea.View {
 	}
 	if m.deleteTokenIdx >= 0 {
 		return tea.NewView(m.viewDeleteTokenDialog())
+	}
+	if m.removeFillGroup != "" {
+		return tea.NewView(m.viewRemoveFillDialog())
+	}
+	if m.confirmDeleteShape {
+		return tea.NewView(m.viewDeleteShapeDialog())
 	}
 	if m.mode == modeTokenMenu {
 		return tea.NewView(m.viewTokenMenu())
@@ -1718,7 +2130,11 @@ func (m TableViewModel) topBar() string {
 		case modeText:
 			left += "  " + styles.Highlight.Render("TEXT")
 		case modeMove:
-			left += "  " + styles.Highlight.Render("MOVE")
+			label := "MOVE"
+			if m.moveSnap {
+				label = "MOVE [SNAP]"
+			}
+			left += "  " + styles.Highlight.Render(label)
 		case modeLayer:
 			left += "  " + styles.Highlight.Render("LAYER")
 		case modeTokenMenu:
@@ -1755,7 +2171,11 @@ func (m TableViewModel) topBar() string {
 	case modeText:
 		right = styles.Subtle.Render("type text  enter: newline  arrows: move  ctrl+s: commit  esc: cancel")
 	case modeMove:
-		right = styles.Subtle.Render("hjkl: move  enter: place  m: mode  esc: cancel")
+		if m.movingTokenIdx >= 0 {
+			right = styles.Subtle.Render("hjkl: move  tab: snap  enter: place  m: mode  esc: cancel")
+		} else {
+			right = styles.Subtle.Render("hjkl: move  enter: place  m: mode  esc: cancel")
+		}
 	case modeTokenMenu:
 		if m.tokenCreateMode {
 			right = styles.Subtle.Render("type name  enter: create  esc: cancel")
@@ -1809,10 +2229,17 @@ func (m TableViewModel) viewTokenColor() string {
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
 	title := "Token Color"
-	if m.colorOverlayPositions != nil {
+	if m.fillPositions != nil {
+		title = "Fill Color"
+	} else if m.colorOverlayPositions != nil {
 		title = "Color"
 	}
 	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render(title)))
+	if m.fillPositions != nil {
+		opacityLabels := []string{"░ Light", "▒ Medium", "▓ Heavy", "█ Solid"}
+		sb.WriteString(fmt.Sprintf("  Opacity: %s\n", styles.Highlight.Render(opacityLabels[m.fillOpacity])))
+		sb.WriteString(styles.Subtle.Render("  h/l: change opacity") + "\n\n")
+	}
 	for i, tc := range tokenColors {
 		prefix := "  "
 		if i == m.colorCursor {

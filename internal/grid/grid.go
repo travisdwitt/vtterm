@@ -3,8 +3,8 @@ package grid
 import "strings"
 
 const (
-	cellWidth  = 3 // matches token label width (5 total with +…+ borders)
-	cellHeight = 1 // matches token label height (3 total with +…+ borders)
+	cellWidth  = 7 // inner width so tokens (5 wide) sit centered
+	cellHeight = 3 // inner height so tokens (3 tall) sit centered
 )
 
 func RenderSquare(cols, rows int) string {

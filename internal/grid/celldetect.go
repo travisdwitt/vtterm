@@ -4,8 +4,8 @@ import "math"
 
 // Exported geometry constants derived from unexported cellWidth=3, cellHeight=1.
 const (
-	SquareCellW = 4 // cellWidth + 1 border
-	SquareCellH = 2 // cellHeight + 1 border
+	SquareCellW = 8 // cellWidth + 1 border
+	SquareCellH = 4 // cellHeight + 1 border
 
 	FlatHexSpacingX = 6
 	FlatHexSpacingY = 4
