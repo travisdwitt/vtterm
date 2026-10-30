@@ -44,6 +44,26 @@ type TokenPlacement struct {
 	Facing  int    `json:"facing,omitempty"` // 0=up, rotates clockwise
 	Color   string `json:"color,omitempty"`  // ANSI color number, empty = default
 	Locked  bool   `json:"locked,omitempty"`
+	Off     bool   `json:"disabled,omitempty"`
+	W       int    `json:"w,omitempty"` // 0 = default width
+	H       int    `json:"h,omitempty"` // 0 = default height
+}
+
+const (
+	TokenW   = 5
+	TokenH   = 3
+	TokenMin = 3
+)
+
+func (p TokenPlacement) Size() (int, int) {
+	w, h := p.W, p.H
+	if w == 0 {
+		w = TokenW
+	}
+	if h == 0 {
+		h = TokenH
+	}
+	return w, h
 }
 
 type TokenLibrary struct {
@@ -78,15 +98,6 @@ func (lib *TokenLibrary) FindTokenDef(id string) *TokenDef {
 		}
 	}
 	return nil
-}
-
-func (td *TokenDef) IsDisabled() bool {
-	for _, p := range td.Properties {
-		if p.Key == "Disabled" {
-			return true
-		}
-	}
-	return false
 }
 
 // Visible returns the properties shown in tooltips, skipping keys prefixed "H-".

@@ -16,6 +16,7 @@ const (
 	dragPan
 	dragMove
 	dragDraw
+	dragResize
 )
 
 func (m TableViewModel) updateMouse(message tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -36,6 +37,8 @@ func (m TableViewModel) updateMouse(message tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.normalMouse(e)
 	case modeMove:
 		return m.moveMouse(e)
+	case modeResize:
+		return m.resizeMouse(e)
 	case modeDrawBox, modeDrawLine, modeDrawCircle, modeText:
 		return m.drawMouse(e)
 	case modeLayer:
@@ -159,7 +162,7 @@ func (m TableViewModel) buildMenu() []menuItem {
 	}
 	if pi := m.findTokenPlacementAt(wx, wy); pi >= 0 {
 		toggle := "Disable"
-		if def := m.tokenLib.FindTokenDef(m.table.TokenPlacements[pi].TokenID); def != nil && def.IsDisabled() {
+		if m.table.TokenPlacements[pi].Off {
 			toggle = "Enable"
 		}
 		items = []menuItem{
@@ -168,6 +171,7 @@ func (m TableViewModel) buildMenu() []menuItem {
 			{"Inspect", []string{"i"}},
 			{"Edit", []string{"e"}},
 			{"Rotate", []string{"r"}},
+			{"Resize", []string{"R"}},
 			{"Color", []string{"c"}},
 			{toggle, []string{"d"}},
 			{"Delete", []string{"D"}},
@@ -226,15 +230,10 @@ func (m TableViewModel) menuMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 
 func (m TableViewModel) moveMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 	dragging := m.drag == dragMove
+	if e.Kind == mouse.Motion || e.Kind == mouse.Release && dragging {
+		m = m.moveTo(e)
+	}
 	switch {
-	case e.Kind == mouse.Motion:
-		dx, dy := e.X+m.panX-m.grabX, e.Y-1+m.panY-m.grabY
-		if m.movingTokenIdx >= 0 {
-			m.tokenMoveOffsetX, m.tokenMoveOffsetY = dx, dy
-		} else {
-			m.moveOffsetX, m.moveOffsetY = dx, dy
-		}
-		m.moved = m.moved || dx != 0 || dy != 0
 	case e.Right(), e.Kind == mouse.Release && dragging && !m.moved:
 		m.drag = dragNone
 		return mouse.Feed(m, "esc")
@@ -248,6 +247,79 @@ func (m TableViewModel) moveMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m TableViewModel) moveTo(e mouse.Event) TableViewModel {
+	dx, dy := e.X+m.panX-m.grabX, e.Y-1+m.panY-m.grabY
+	if m.movingTokenIdx >= 0 {
+		m.tokenMoveOffsetX, m.tokenMoveOffsetY = dx, dy
+	} else {
+		m.moveOffsetX, m.moveOffsetY = dx, dy
+	}
+	m.moved = m.moved || dx != 0 || dy != 0
+	return m
+}
+
+func (m TableViewModel) resizeMouse(e mouse.Event) (tea.Model, tea.Cmd) {
+	wx, wy := e.X+m.panX, e.Y-1+m.panY
+	p := &m.table.TokenPlacements[m.resizeIdx]
+	switch {
+	case e.Right():
+		m.drag = dragNone
+		return mouse.Feed(m, "esc")
+	case e.Left():
+		w, h := p.Size()
+		dx, dy := 0, 0
+		switch wx {
+		case p.X:
+			dx = -1
+		case p.X + w - 1:
+			dx = 1
+		}
+		switch wy {
+		case p.Y:
+			dy = -1
+		case p.Y + h - 1:
+			dy = 1
+		}
+		if dx == 0 || dy == 0 {
+			return m, nil
+		}
+		m.drag = dragResize
+		m.resizeDirX, m.resizeDirY = dx, dy
+		m.resizeAX, m.resizeAY = p.X, p.Y
+		if dx < 0 {
+			m.resizeAX = p.X + w - 1
+		}
+		if dy < 0 {
+			m.resizeAY = p.Y + h - 1
+		}
+	case m.drag != dragResize:
+	case e.Kind == mouse.Motion:
+		m.resizeTo(wx, wy)
+	case e.Kind == mouse.Release:
+		m.resizeTo(wx, wy)
+		m.drag = dragNone
+		return mouse.Feed(m, "enter")
+	}
+	return m, nil
+}
+
+func (m *TableViewModel) resizeTo(wx, wy int) {
+	p := &m.table.TokenPlacements[m.resizeIdx]
+	w, x := span(m.resizeAX, wx, m.resizeDirX)
+	h, y := span(m.resizeAY, wy, m.resizeDirY)
+	setSize(p, w, h)
+	p.X, p.Y = x, y
+}
+
+func span(anchor, to, dir int) (size, start int) {
+	if dir > 0 {
+		size = max(to-anchor+1, table.TokenMin)
+		return size, anchor
+	}
+	size = max(anchor-to+1, table.TokenMin)
+	return size, anchor - size + 1
+}
+
 func (m TableViewModel) drawMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 	switch {
 	case e.Left() && m.mode == modeText:
@@ -256,6 +328,7 @@ func (m TableViewModel) drawMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 		m.drag = dragNone
 		return mouse.Feed(m, "esc")
 	case e.Kind == mouse.Release && m.drag == dragDraw:
+		m = m.drawTo(e)
 		m.drag = dragNone
 		if len(m.pending) <= 1 {
 			return mouse.Feed(m, "esc")
@@ -264,6 +337,10 @@ func (m TableViewModel) drawMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 	case e.Kind != mouse.Motion:
 		return m, nil
 	}
+	return m.drawTo(e), nil
+}
+
+func (m TableViewModel) drawTo(e mouse.Event) TableViewModel {
 	switch m.mode {
 	case modeDrawBox:
 		wx, wy := m.pointCursor(e)
@@ -289,7 +366,7 @@ func (m TableViewModel) drawMouse(e mouse.Event) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	return m, nil
+	return m
 }
 
 func sign(n int) int {
@@ -347,7 +424,7 @@ func (m TableViewModel) overlay() *ctxMenu {
 		return m.tip
 	case m.inspectTokenIdx >= 0 && m.inspectTokenIdx < len(m.table.TokenPlacements):
 		p := m.table.TokenPlacements[m.inspectTokenIdx]
-		return m.tipFor(m.inspectTokenIdx, p.X+6-m.panX, p.Y-m.panY+1)
+		return m.tipFor(m.inspectTokenIdx, p.X+table.TokenW+1-m.panX, p.Y-m.panY+1)
 	}
 	return nil
 }
@@ -359,6 +436,9 @@ func (m *TableViewModel) hover(e mouse.Event) tea.Cmd {
 		return nil
 	}
 	m.hoverX, m.hoverY = e.X, e.Y
+	if m.findTokenPlacementAt(e.X+m.panX, e.Y-1+m.panY) < 0 {
+		return nil
+	}
 	seq := m.hoverSeq
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return hoverMsg{seq} })
 }

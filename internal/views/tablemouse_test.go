@@ -239,3 +239,81 @@ func TestInspectTip(t *testing.T) {
 		t.Fatal("second i did not close tooltip")
 	}
 }
+
+func TestTokenResize(t *testing.T) {
+	lib := &table.TokenLibrary{Defs: []table.TokenDef{{ID: "a", Properties: []table.TokenProperty{{Key: "Name", Value: "Gob"}}}}}
+	tb := table.Table{Name: "t", GridType: table.GridTypeGrid, Width: 5, Height: 5,
+		TokenPlacements: []table.TokenPlacement{{TokenID: "a", X: 10, Y: 5}}}
+	key := func(s string) tea.Msg { return tea.KeyPressMsg{Code: []rune(s)[0], Text: s} }
+	arrow := func(c rune) tea.Msg { return tea.KeyPressMsg{Code: c} }
+	size := func(m TableViewModel) [4]int {
+		p := m.table.TokenPlacements[0]
+		w, h := p.Size()
+		return [4]int{p.X, p.Y, w, h}
+	}
+	m := NewTableView(tb, lib, 120, 40)
+
+	m = send(m, click(11, 7, tea.MouseLeft), tea.MouseReleaseMsg{X: 11, Y: 7, Button: tea.MouseLeft}, key("R"))
+	if m.mode != modeResize {
+		t.Fatalf("R did not start resize: mode %v", m.mode)
+	}
+	m = send(m, arrow(tea.KeyRight), key("j"), tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := size(m); got != [4]int{10, 5, 6, 4} || m.mode != modeNormal || len(m.undo) != 1 {
+		t.Fatalf("keyboard resize: %v mode %v undo %d", got, m.mode, len(m.undo))
+	}
+
+	m = send(m, key("R"), key("l"), tea.KeyPressMsg{Code: tea.KeyEscape})
+	if got := size(m); got != [4]int{10, 5, 6, 4} || m.mode != modeNormal {
+		t.Fatalf("esc did not cancel: %v", got)
+	}
+
+	m = send(m, key("R"), click(15, 9, tea.MouseLeft), tea.MouseMotionMsg{X: 20, Y: 11, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 20, Y: 11, Button: tea.MouseLeft})
+	if got := size(m); got != [4]int{10, 5, 11, 6} || m.mode != modeNormal {
+		t.Fatalf("corner drag: %v mode %v", got, m.mode)
+	}
+
+	m = send(m, key("R"), click(10, 6, tea.MouseLeft), tea.MouseReleaseMsg{X: 8, Y: 5, Button: tea.MouseLeft})
+	if got := size(m); got != [4]int{8, 4, 13, 7} || m.mode != modeNormal {
+		t.Fatalf("top-left drag: %v mode %v", got, m.mode)
+	}
+
+	m = send(m, key("R"))
+	for range 20 {
+		m = send(m, arrow(tea.KeyLeft), arrow(tea.KeyUp))
+	}
+	m = send(m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if got := size(m); got != [4]int{8, 4, 3, 3} {
+		t.Fatalf("min size: %v", got)
+	}
+	if n := len(m.tokenBoxRunes(m.table.TokenPlacements[0])); n != 9 {
+		t.Fatalf("3x3 box cells = %d", n)
+	}
+
+	m = send(m, click(9, 6, tea.MouseRight))
+	found := false
+	if m.menu != nil {
+		for _, it := range m.menu.items {
+			found = found || it.label == "Resize"
+		}
+	}
+	if !found {
+		t.Fatal("token menu has no Resize")
+	}
+}
+
+func TestDisableOne(t *testing.T) {
+	lib := &table.TokenLibrary{Defs: []table.TokenDef{{ID: "a"}}}
+	tb := table.Table{Name: "t", GridType: table.GridTypeGrid, Width: 5, Height: 5,
+		TokenPlacements: []table.TokenPlacement{{TokenID: "a", X: 10, Y: 5}, {TokenID: "a", X: 30, Y: 5}}}
+	m := NewTableView(tb, lib, 120, 40)
+	m = send(m, click(11, 7, tea.MouseLeft), tea.MouseReleaseMsg{X: 11, Y: 7, Button: tea.MouseLeft},
+		tea.KeyPressMsg{Code: 'd', Text: "d"})
+	ps := m.table.TokenPlacements
+	if !ps[0].Off || ps[1].Off || len(m.undo) != 1 {
+		t.Fatalf("disable: %+v undo %d", ps, len(m.undo))
+	}
+	if m.resolveTokenColor(ps[1]) == "disabled" {
+		t.Fatal("second token rendered disabled")
+	}
+}

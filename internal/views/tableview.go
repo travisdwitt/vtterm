@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
@@ -33,6 +34,7 @@ const (
 	modeTokenMenu          // browsing token library
 	modeTokenEdit          // editing token properties
 	modeTokenColor         // picking token color
+	modeResize             // resizing a token
 )
 
 var fillRunes = []rune{'░', '▒', '▓', '█'}
@@ -160,6 +162,11 @@ type TableViewModel struct {
 	tool         string
 
 	circleX, circleY, circleR int
+
+	resizeIdx              int
+	resizeOrig             table.TokenPlacement
+	resizeAX, resizeAY     int
+	resizeDirX, resizeDirY int
 }
 
 type tvSaveResultMsg struct{ err error }
@@ -371,6 +378,8 @@ func (m TableViewModel) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTokenEdit(message)
 		case modeTokenColor:
 			return m.updateTokenColor(message)
+		case modeResize:
+			return m.updateResize(message)
 		default:
 			return m.updateNormal(message)
 		}
@@ -530,27 +539,20 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 				m.table.TokenPlacements[pi].Facing = (m.table.TokenPlacements[pi].Facing + 1) % faces
 			}
 		}
+	case "R":
+		if hasGrid {
+			pi := m.findTokenPlacementAt(m.cursorX+m.panX, m.cursorY+m.panY)
+			if pi >= 0 && !m.table.TokenPlacements[pi].Locked {
+				m.beginResize(pi)
+			}
+		}
 	case "d":
 		if hasGrid {
 			wx := m.cursorX + m.panX
 			wy := m.cursorY + m.panY
 			pi := m.findTokenPlacementAt(wx, wy)
 			if pi >= 0 {
-				def := m.tokenLib.FindTokenDef(m.table.TokenPlacements[pi].TokenID)
-				if def != nil {
-					if def.IsDisabled() {
-						props := def.Properties[:0]
-						for _, p := range def.Properties {
-							if p.Key != "Disabled" {
-								props = append(props, p)
-							}
-						}
-						def.Properties = props
-					} else {
-						def.Properties = append(def.Properties, table.TokenProperty{Key: "Disabled", Value: "true"})
-					}
-					cmd = tsSaveLibCmd(m.tokenLib)
-				}
+				m.table.TokenPlacements[pi].Off = !m.table.TokenPlacements[pi].Off
 			}
 		}
 	case "D":
@@ -1110,6 +1112,47 @@ func (m TableViewModel) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea
 	return m, nil
 }
 
+func setSize(p *table.TokenPlacement, w, h int) {
+	if w == table.TokenW {
+		w = 0
+	}
+	if h == table.TokenH {
+		h = 0
+	}
+	p.W, p.H = w, h
+}
+
+func (m *TableViewModel) beginResize(ti int) {
+	m.resizeIdx = ti
+	m.resizeOrig = m.table.TokenPlacements[ti]
+	m.drag = dragNone
+	m.mode = modeResize
+}
+
+func (m TableViewModel) updateResize(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	p := &m.table.TokenPlacements[m.resizeIdx]
+	w, h := p.Size()
+	switch message.String() {
+	case "h", "left":
+		w--
+	case "l", "right":
+		w++
+	case "k", "up":
+		h--
+	case "j", "down":
+		h++
+	case "enter":
+		m.mode = modeNormal
+		return m, nil
+	case "esc":
+		*p = m.resizeOrig
+		m.mode = modeNormal
+		return m, nil
+	}
+	setSize(p, max(w, table.TokenMin), max(h, table.TokenMin))
+	return m, nil
+}
+
 func (m *TableViewModel) beginTokenMove(ti int) {
 	m.movingTokenIdx = ti
 	p := m.table.TokenPlacements[ti]
@@ -1129,13 +1172,14 @@ func (m *TableViewModel) snapTokenToCell() {
 	}
 	cfn := m.centerFunc()
 	// Token center in world space: origin + offset + half token size (token is 5x3).
-	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + 2
-	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + 1
+	tw, th := m.table.TokenPlacements[m.movingTokenIdx].Size()
+	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + tw/2
+	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + th/2
 	col, row := grid.NearestCell(tcx, tcy, cols, rows, cfn)
 	cx, cy := cfn(col, row)
 	// Set offset so token center lands on cell center.
-	m.tokenMoveOffsetX = cx - 2 - m.tokenMoveOriginX
-	m.tokenMoveOffsetY = cy - 1 - m.tokenMoveOriginY
+	m.tokenMoveOffsetX = cx - tw/2 - m.tokenMoveOriginX
+	m.tokenMoveOffsetY = cy - th/2 - m.tokenMoveOriginY
 }
 
 // moveTokenSnap moves the token to the adjacent cell in the given direction.
@@ -1146,8 +1190,9 @@ func (m *TableViewModel) moveTokenSnap(dcol, drow int) {
 	}
 	cfn := m.centerFunc()
 	// Current token center.
-	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + 2
-	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + 1
+	tw, th := m.table.TokenPlacements[m.movingTokenIdx].Size()
+	tcx := m.tokenMoveOriginX + m.tokenMoveOffsetX + tw/2
+	tcy := m.tokenMoveOriginY + m.tokenMoveOffsetY + th/2
 	curCol, curRow := grid.NearestCell(tcx, tcy, cols, rows, cfn)
 	newCol := curCol + dcol
 	newRow := curRow + drow
@@ -1162,8 +1207,8 @@ func (m *TableViewModel) moveTokenSnap(dcol, drow int) {
 		newRow = rows - 1
 	}
 	cx, cy := cfn(newCol, newRow)
-	m.tokenMoveOffsetX = cx - 2 - m.tokenMoveOriginX
-	m.tokenMoveOffsetY = cy - 1 - m.tokenMoveOriginY
+	m.tokenMoveOffsetX = cx - tw/2 - m.tokenMoveOriginX
+	m.tokenMoveOffsetY = cy - th/2 - m.tokenMoveOriginY
 }
 
 func (m TableViewModel) floodSelectOverlayPositions(startX, startY int) [][2]int {
@@ -1698,8 +1743,7 @@ func tvExportCmd(t table.Table) tea.Cmd {
 }
 
 func (m TableViewModel) resolveTokenColor(p table.TokenPlacement) string {
-	def := m.tokenLib.FindTokenDef(p.TokenID)
-	if def != nil && def.IsDisabled() {
+	if p.Off {
 		return "disabled"
 	}
 	if p.Color != "" {
@@ -1713,7 +1757,8 @@ func (m TableViewModel) findTokenPlacementAt(wx, wy int) int {
 		if p.Layer != m.currentLayer {
 			continue
 		}
-		if wx >= p.X && wx < p.X+5 && wy >= p.Y && wy < p.Y+3 {
+		w, h := p.Size()
+		if wx >= p.X && wx < p.X+w && wy >= p.Y && wy < p.Y+h {
 			return i
 		}
 	}
@@ -1994,32 +2039,105 @@ func (m TableViewModel) View() tea.View {
 	return tea.NewView(m.topBar() + "\n" + m.renderViewport(vpW, vpH))
 }
 
+type tokCell struct {
+	x     int
+	r     rune
+	color string
+}
+
+func (m TableViewModel) tokenRows() map[int][]tokCell {
+	rows := make(map[int][]tokCell)
+	add := func(p table.TokenPlacement) {
+		tc := m.resolveTokenColor(p)
+		for c, r := range m.tokenBoxRunes(p) {
+			rows[c[1]] = append(rows[c[1]], tokCell{c[0], r, tc})
+		}
+	}
+	for pi, p := range m.table.TokenPlacements {
+		if p.Layer != m.currentLayer || pi == m.movingTokenIdx {
+			continue
+		}
+		add(p)
+	}
+	if m.movingTokenIdx >= 0 && m.movingTokenIdx < len(m.table.TokenPlacements) {
+		p := m.table.TokenPlacements[m.movingTokenIdx]
+		p.X = m.tokenMoveOriginX + m.tokenMoveOffsetX
+		p.Y = m.tokenMoveOriginY + m.tokenMoveOffsetY
+		p.Layer = m.currentLayer
+		add(p)
+	}
+	return rows
+}
+
+var (
+	styleMu    sync.Mutex
+	colorStyle = map[string]lipgloss.Style{}
+)
+
+func fgStyle(c string) lipgloss.Style {
+	styleMu.Lock()
+	defer styleMu.Unlock()
+	st, ok := colorStyle[c]
+	if !ok {
+		st = lipgloss.NewStyle().Foreground(lipgloss.Color(c))
+		colorStyle[c] = st
+	}
+	return st
+}
+
 func (m TableViewModel) renderViewport(vpW, vpH int) string {
 	var sb strings.Builder
+	ov := m.overlay()
+	trows := m.tokenRows()
 	for sy := range vpH {
 		wy := sy + m.panY
-		runes, overlayColor, tokenColor := m.worldLine(wy, vpW)
+		runes, overlayColor, tokenColor := m.worldLine(wy, vpW, trows[wy])
 
+		var run strings.Builder
+		key := ""
+		flush := func() {
+			if run.Len() == 0 {
+				return
+			}
+			switch key {
+			case "":
+				sb.WriteString(run.String())
+			case "\x00cursor":
+				sb.WriteString(styles.CursorStyle.Render(run.String()))
+			case "\x00grid":
+				sb.WriteString(styles.GridStyle.Render(run.String()))
+			case "\x00disabled":
+				sb.WriteString(styles.TokenDisabledStyle.Render(run.String()))
+			default:
+				sb.WriteString(fgStyle(key).Render(run.String()))
+			}
+			run.Reset()
+		}
 		for i, r := range runes {
-			ch := string(r)
-			if mr, in, sel := m.overlay().cell(i, sy+1); in {
+			k := ""
+			if mr, in, sel := ov.cell(i, sy+1); in {
+				r = mr
 				if sel {
-					sb.WriteString(styles.CursorStyle.Render(string(mr)))
-				} else {
-					sb.WriteString(string(mr))
+					k = "\x00cursor"
 				}
 			} else if sy == m.cursorY && i == m.cursorX {
-				sb.WriteString(styles.CursorStyle.Render(ch))
+				k = "\x00cursor"
 			} else if tokenColor[i] == "disabled" {
-				sb.WriteString(styles.TokenDisabledStyle.Render(ch))
+				k = "\x00disabled"
 			} else if tokenColor[i] != "" {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(tokenColor[i])).Render(ch))
+				k = tokenColor[i]
 			} else if overlayColor[i] != "" {
-				sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(overlayColor[i])).Render(ch))
+				k = overlayColor[i]
 			} else {
-				sb.WriteString(styles.GridStyle.Render(ch))
+				k = "\x00grid"
 			}
+			if k != key {
+				flush()
+				key = k
+			}
+			run.WriteRune(r)
 		}
+		flush()
 
 		if sy < vpH-1 {
 			sb.WriteByte('\n')
@@ -2028,7 +2146,7 @@ func (m TableViewModel) renderViewport(vpW, vpH int) string {
 	return sb.String()
 }
 
-func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
+func (m TableViewModel) worldLine(wy, w int, toks []tokCell) ([]rune, []string, []string) {
 	var gridRunes []rune
 	if wy >= 0 && wy < len(m.gridLines) {
 		gridRunes = []rune(m.gridLines[wy])
@@ -2067,43 +2185,12 @@ func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	for pi, p := range m.table.TokenPlacements {
-		if p.Layer != m.currentLayer {
-			continue
-		}
-		if pi == m.movingTokenIdx {
-			continue
-		}
-		tc := m.resolveTokenColor(p)
-		box := m.tokenBoxRunes(p)
-		for coord, r := range box {
-			sx := coord[0] - m.panX
-			if sx >= 0 && sx < w && coord[1] == wy {
-				result[sx] = r
-				tokenColor[sx] = tc
-				overlayColor[sx] = ""
-			}
-		}
-	}
-
-	if m.movingTokenIdx >= 0 && m.movingTokenIdx < len(m.table.TokenPlacements) {
-		p := m.table.TokenPlacements[m.movingTokenIdx]
-		tc := m.resolveTokenColor(p)
-		movedP := table.TokenPlacement{
-			TokenID: p.TokenID,
-			X:       m.tokenMoveOriginX + m.tokenMoveOffsetX,
-			Y:       m.tokenMoveOriginY + m.tokenMoveOffsetY,
-			Layer:   m.currentLayer,
-			Facing:  p.Facing,
-		}
-		box := m.tokenBoxRunes(movedP)
-		for coord, r := range box {
-			sx := coord[0] - m.panX
-			if sx >= 0 && sx < w && coord[1] == wy {
-				result[sx] = r
-				tokenColor[sx] = tc
-				overlayColor[sx] = ""
-			}
+	for _, t := range toks {
+		sx := t.x - m.panX
+		if sx >= 0 && sx < w {
+			result[sx] = t.r
+			tokenColor[sx] = t.color
+			overlayColor[sx] = ""
 		}
 	}
 
@@ -2123,12 +2210,14 @@ func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
 		}
 	}
 
-	for i := range w {
-		wx := i + m.panX
-		if r, ok := m.pending[[2]int{wx, wy}]; ok {
-			result[i] = r
-			overlayColor[i] = "255"
-			tokenColor[i] = ""
+	if m.pending != nil {
+		for i := range w {
+			wx := i + m.panX
+			if r, ok := m.pending[[2]int{wx, wy}]; ok {
+				result[i] = r
+				overlayColor[i] = "255"
+				tokenColor[i] = ""
+			}
 		}
 	}
 
@@ -2142,49 +2231,55 @@ func (m TableViewModel) tokenBoxRunes(p table.TokenPlacement) map[[2]int]rune {
 		label = def.DisplayLabel()
 	}
 	labelRunes := []rune(label)
+	w, h := p.Size()
+	if len(labelRunes) > w-2 {
+		labelRunes = labelRunes[:w-2]
+	}
 
 	box := make(map[[2]int]rune)
-	box[[2]int{p.X, p.Y}] = '+'
-	box[[2]int{p.X + 1, p.Y}] = '-'
-	box[[2]int{p.X + 2, p.Y}] = '-'
-	box[[2]int{p.X + 3, p.Y}] = '-'
-	box[[2]int{p.X + 4, p.Y}] = '+'
-	box[[2]int{p.X, p.Y + 1}] = '|'
-	for i, r := range labelRunes {
-		box[[2]int{p.X + 1 + i, p.Y + 1}] = r
+	r, b := p.X+w-1, p.Y+h-1
+	mx, my := p.X+w/2, p.Y+h/2
+	for x := p.X + 1; x < r; x++ {
+		box[[2]int{x, p.Y}] = '-'
+		box[[2]int{x, b}] = '-'
 	}
-	box[[2]int{p.X + 4, p.Y + 1}] = '|'
-	box[[2]int{p.X, p.Y + 2}] = '+'
-	box[[2]int{p.X + 1, p.Y + 2}] = '-'
-	box[[2]int{p.X + 2, p.Y + 2}] = '-'
-	box[[2]int{p.X + 3, p.Y + 2}] = '-'
-	box[[2]int{p.X + 4, p.Y + 2}] = '+'
+	for y := p.Y + 1; y < b; y++ {
+		box[[2]int{p.X, y}] = '|'
+		box[[2]int{r, y}] = '|'
+	}
+	box[[2]int{p.X, p.Y}] = '+'
+	box[[2]int{r, p.Y}] = '+'
+	box[[2]int{p.X, b}] = '+'
+	box[[2]int{r, b}] = '+'
+	for i, lr := range labelRunes {
+		box[[2]int{p.X + 1 + (w-2-len(labelRunes))/2 + i, my}] = lr
+	}
 
 	if m.table.GridType == table.GridTypeHex {
 		switch p.Facing % 6 {
 		case 0:
-			box[[2]int{p.X + 2, p.Y}] = '^'
+			box[[2]int{mx, p.Y}] = '^'
 		case 1:
-			box[[2]int{p.X + 4, p.Y}] = '/'
+			box[[2]int{r, p.Y}] = '/'
 		case 2:
-			box[[2]int{p.X + 4, p.Y + 2}] = '\\'
+			box[[2]int{r, b}] = '\\'
 		case 3:
-			box[[2]int{p.X + 2, p.Y + 2}] = 'v'
+			box[[2]int{mx, b}] = 'v'
 		case 4:
-			box[[2]int{p.X, p.Y + 2}] = '/'
+			box[[2]int{p.X, b}] = '/'
 		case 5:
 			box[[2]int{p.X, p.Y}] = '\\'
 		}
 	} else {
 		switch p.Facing % 4 {
 		case 0:
-			box[[2]int{p.X + 2, p.Y}] = '^'
+			box[[2]int{mx, p.Y}] = '^'
 		case 1:
-			box[[2]int{p.X + 4, p.Y + 1}] = '>'
+			box[[2]int{r, my}] = '>'
 		case 2:
-			box[[2]int{p.X + 2, p.Y + 2}] = 'v'
+			box[[2]int{mx, b}] = 'v'
 		case 3:
-			box[[2]int{p.X, p.Y + 1}] = '<'
+			box[[2]int{p.X, my}] = '<'
 		}
 	}
 
@@ -2250,6 +2345,9 @@ func (m TableViewModel) topBar() string {
 			left += "  " + styles.Highlight.Render("TOKEN EDIT")
 		case modeTokenColor:
 			left += "  " + styles.Highlight.Render("COLOR")
+		case modeResize:
+			w, h := m.table.TokenPlacements[m.resizeIdx].Size()
+			left += "  " + styles.Highlight.Render(fmt.Sprintf("RESIZE %dx%d  arrows/hjkl: size  enter: save  esc: cancel", w, h))
 		}
 	}
 	if m.statusMsg != "" {
