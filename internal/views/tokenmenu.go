@@ -5,8 +5,16 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/table"
 )
+
+var tokenBtns = []mouse.Button{{Label: "New", Key: "n"}, {Label: "Folder", Key: "f"}, {Label: "Edit", Key: "e"}, {Label: "Delete", Key: "d"}, {Label: "Back", Key: "esc"}}
+
+func tokenListKeys(e mouse.Event, items []tokenMenuItem, cur int) []string {
+	i := e.Y - 4
+	return mouse.ListKeys(e, 4, len(items), cur, i >= 0 && i < len(items) && items[i].kind == tmFolder)
+}
 
 type tokenMenuItemKind int
 

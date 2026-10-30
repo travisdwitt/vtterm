@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textinput"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
 	"github.com/traviswitt/vtterm/internal/table"
@@ -51,6 +52,12 @@ func (m WizardModel) Init() tea.Cmd {
 
 func (m WizardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case tea.MouseMsg:
+		n := 0
+		if m.step == stepGridType {
+			n = len(m.gridChoices)
+		}
+		return mouse.Feed(m, mouse.ListKeys(mouse.Of(message), 4, n, m.gridCursor, true)...)
 	case tea.KeyPressMsg:
 		switch message.String() {
 		case "esc":

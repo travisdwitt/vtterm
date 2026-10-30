@@ -3,6 +3,7 @@ package table
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -15,12 +16,13 @@ const (
 )
 
 type OverlayChar struct {
-	X     int    `json:"x"`
-	Y     int    `json:"y"`
-	R     string `json:"r"`
-	Layer int    `json:"layer,omitempty"`
-	Color string `json:"color,omitempty"`
-	Group string `json:"group,omitempty"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	R      string `json:"r"`
+	Layer  int    `json:"layer,omitempty"`
+	Color  string `json:"color,omitempty"`
+	Group  string `json:"group,omitempty"`
+	Locked bool   `json:"locked,omitempty"`
 }
 
 type TokenProperty struct {
@@ -41,6 +43,7 @@ type TokenPlacement struct {
 	Layer   int    `json:"layer,omitempty"`
 	Facing  int    `json:"facing,omitempty"` // 0=up, rotates clockwise
 	Color   string `json:"color,omitempty"`  // ANSI color number, empty = default
+	Locked  bool   `json:"locked,omitempty"`
 }
 
 type TokenLibrary struct {
@@ -84,6 +87,17 @@ func (td *TokenDef) IsDisabled() bool {
 		}
 	}
 	return false
+}
+
+// Visible returns the properties shown in tooltips, skipping keys prefixed "H-".
+func (td *TokenDef) Visible() []TokenProperty {
+	var props []TokenProperty
+	for _, p := range td.Properties {
+		if !strings.HasPrefix(p.Key, "H-") {
+			props = append(props, p)
+		}
+	}
+	return props
 }
 
 func (td *TokenDef) DisplayLabel() string {

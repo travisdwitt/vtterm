@@ -41,6 +41,12 @@ func (e *Editor) Commit() []table.TokenProperty {
 	return props
 }
 
+// Click moves the cursor to the given line and column, clamped to the text.
+func (e *Editor) Click(row, col int) {
+	e.CurRow = max(min(row, len(e.Lines)-1), 0)
+	e.CurCol = max(min(col, len(e.Lines[e.CurRow])), 0)
+}
+
 // HandleKey processes a key press. Returns done=true on ctrl+s, cancelled=true on esc.
 func (e *Editor) HandleKey(msg tea.KeyPressMsg) (done, cancelled bool) {
 	key := msg.String()

@@ -2,6 +2,7 @@ package views
 
 import (
 	tea "charm.land/bubbletea/v2"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
 )
@@ -22,6 +23,8 @@ func (m MainMenuModel) Init() tea.Cmd {
 
 func (m MainMenuModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
+	case tea.MouseMsg:
+		return mouse.Feed(m, mouse.ListKeys(mouse.Of(message), 6, len(mainMenuChoices), m.cursor, true)...)
 	case tea.KeyPressMsg:
 		switch message.String() {
 		case "ctrl+c":

@@ -97,6 +97,21 @@ The top bar shows your current position, layer, mode, and available commands.
 | `shift+tab` | Jump to previous token |
 | `esc` | Exit pan mode / cancel current action |
 
+### Mouse
+
+| Action | Result |
+|--------|--------|
+| Right-click | Context menu for the token, shape, or empty cell under the pointer |
+| Drag a token or shape | Move it (tokens snap to the nearest cell on release) |
+| Hover a token for 1s | Floating tooltip with its properties |
+| Drag empty space | Pan |
+| Scroll wheel | Pan (or `+`/`-` in layer mode) |
+| Menu → Box / Line / Circle | Arms the tool. Hold left button and drag to draw, release to set the shape, right-click to cancel. A click without a drag creates nothing. Circles are drawn from the center out |
+| Menu → Text | Type, left-click to commit, right-click to cancel |
+| Dialogs | Left-click = yes, right-click = no |
+| Lists (main menu, load, tokens, colors) | Click to select; click the selected row to confirm; right-click to go back |
+| Token editor | Click to place the cursor, right-click to save |
+
 ### Mode System
 
 vtterm uses a mode-based interface. Press `m` to enter the mode menu, then press a second key to select an action:
@@ -117,6 +132,7 @@ From the draw menu (`m` then `d`):
 |-----|--------|
 | `l` | **Line** — draw a line segment using hjkl to extend |
 | `b` | **Box** — draw a rectangle, hjkl to resize |
+| `c` | **Circle** — draw a circle, `h`/`l` (or `j`/`k`) to change the radius |
 | `ctrl+s` | Commit the drawing to the overlay |
 | `esc` | Cancel and discard |
 
@@ -168,6 +184,7 @@ The current layer number is shown in the top bar as `L:0`, `L:1`, etc. Overlay c
 | `d` | Toggle disabled state on token under cursor |
 | `D` | Delete token placement from the table |
 | `c` | Open color picker for the token or shape under cursor |
+| `x` | Lock/unlock the token or shape under cursor (locked items cannot be moved or dragged; right-click menu has Lock/Unlock) |
 
 ### Color Picker
 
@@ -233,6 +250,8 @@ AC: 12
 | `backspace` / `delete` | Delete characters |
 | `ctrl+s` | Save changes |
 | `esc` | Discard changes |
+
+Prefix a key with `H-` (e.g. `H-Notes: secret`) to keep it out of tooltips and the inspect view. It is still stored on the token and visible in the editor.
 
 ### Token Rendering
 

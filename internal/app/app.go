@@ -105,5 +105,6 @@ func (m Model) View() tea.View {
 		v = tea.NewView("")
 	}
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeAllMotion
 	return v
 }

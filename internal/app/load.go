@@ -5,10 +5,13 @@ import (
 	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
 	"github.com/traviswitt/vtterm/internal/table"
 )
+
+var loadBtns = []mouse.Button{{Label: "Load", Key: "enter"}, {Label: "Delete", Key: "d"}, {Label: "Back", Key: "esc"}}
 
 type loadModel struct {
 	files         []string
@@ -65,6 +68,19 @@ func (m loadModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = 0
 		}
 		return m, nil
+	case tea.MouseMsg:
+		e := mouse.Of(message)
+		if m.confirmDelete {
+			return mouse.Feed(m, mouse.YesNo(e)...)
+		}
+		if ks := mouse.Hit(loadBtns, e, 1); ks != nil {
+			return mouse.Feed(m, ks...)
+		}
+		first := 2
+		if m.err != "" {
+			first = 4
+		}
+		return mouse.Feed(m, mouse.ListKeys(e, first, len(m.files), m.cursor, false)...)
 	case tea.KeyPressMsg:
 		if m.confirmDelete {
 			return m.updateConfirmDelete(message)
@@ -126,7 +142,7 @@ func (m loadModel) View() tea.View {
 		return tea.NewView(s)
 	}
 
-	s := styles.Title.Render("Load Table") + "\n\n"
+	s := styles.Title.Render("Load Table") + "\n" + mouse.Bar(loadBtns) + "\n"
 
 	if m.err != "" {
 		s += styles.Error.Render(m.err) + "\n\n"

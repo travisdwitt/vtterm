@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/traviswitt/vtterm/internal/editor"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
 	"github.com/traviswitt/vtterm/internal/table"
@@ -63,6 +64,8 @@ func (m TokenScreenModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = ""
 		}
 		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(mouse.Of(message))
 	case tea.KeyPressMsg:
 		switch m.mode {
 		case tsEdit:
@@ -73,6 +76,28 @@ func (m TokenScreenModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.updateMenu(message)
 		}
+	}
+	return m, nil
+}
+
+func (m TokenScreenModel) updateMouse(e mouse.Event) (tea.Model, tea.Cmd) {
+	switch {
+	case m.mode == tsEdit:
+		switch {
+		case e.Left():
+			m.editor.Click(e.Y-4, e.X-2)
+		case e.Right():
+			return mouse.Feed(m, "ctrl+s")
+		}
+	case m.confirmDelete:
+		return mouse.Feed(m, mouse.YesNo(e)...)
+	case m.createMode || m.folderMode:
+		return mouse.Feed(m, mouse.ListKeys(e, 0, 0, 0, false)...)
+	default:
+		if ks := mouse.Hit(tokenBtns, e, 3); ks != nil {
+			return mouse.Feed(m, ks...)
+		}
+		return mouse.Feed(m, tokenListKeys(e, m.items, m.cursor)...)
 	}
 	return m, nil
 }
@@ -233,7 +258,11 @@ func (m TokenScreenModel) viewMenu() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
-	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Token Library")))
+	bar := ""
+	if !m.confirmDelete && !m.createMode && !m.folderMode {
+		bar = mouse.Bar(tokenBtns)
+	}
+	sb.WriteString(fmt.Sprintf("\n  %s\n%s\n", styles.Title.Render("Token Library"), bar))
 
 	if m.confirmDelete && m.cursor >= 0 && m.cursor < len(m.items) {
 		item := m.items[m.cursor]

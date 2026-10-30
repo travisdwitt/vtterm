@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/traviswitt/vtterm/internal/editor"
 	"github.com/traviswitt/vtterm/internal/grid"
+	"github.com/traviswitt/vtterm/internal/mouse"
 	"github.com/traviswitt/vtterm/internal/msg"
 	"github.com/traviswitt/vtterm/internal/styles"
 	"github.com/traviswitt/vtterm/internal/table"
@@ -23,6 +25,7 @@ const (
 	modeDrawMenu           // draw menu: l=line, b=box
 	modeDrawLine           // drawing a line
 	modeDrawBox            // drawing a box
+	modeDrawCircle         // drawing a circle
 	modeText               // typing free-form text
 	modeMove               // moving a shape
 	modeLayer              // layer selection with +/-
@@ -84,6 +87,7 @@ type TableViewModel struct {
 	layers       map[int]map[[2]int]rune
 	layerColors  map[int]map[[2]int]string
 	layerGroups  map[int]map[[2]int]string
+	layerLocks   map[int]map[[2]int]bool
 	currentLayer int
 	pending      map[[2]int]rune
 	lineStarted  bool
@@ -141,6 +145,19 @@ type TableViewModel struct {
 	confirmDeleteShape    bool
 
 	tokenNameInput textinput.Model
+
+	menu         *ctxMenu
+	tip          *ctxMenu
+	hoverSeq     int
+	hoverX       int
+	hoverY       int
+	drag         dragKind
+	moved        bool
+	grabX, grabY int
+	lastX, lastY int
+	tool         string
+
+	circleX, circleY, circleR int
 }
 
 type tvSaveResultMsg struct{ err error }
@@ -154,6 +171,7 @@ func NewTableView(t table.Table, lib *table.TokenLibrary, w, h int) TableViewMod
 	m.layers = make(map[int]map[[2]int]rune)
 	m.layerColors = make(map[int]map[[2]int]string)
 	m.layerGroups = make(map[int]map[[2]int]string)
+	m.layerLocks = make(map[int]map[[2]int]bool)
 	m.movingTokenIdx = -1
 	m.inspectTokenIdx = -1
 	m.deleteTokenIdx = -1
@@ -186,6 +204,7 @@ func (m *TableViewModel) syncOverlayToTable() {
 	for layer, ol := range m.layers {
 		lc := m.layerColors[layer]
 		lg := m.layerGroups[layer]
+		ll := m.layerLocks[layer]
 		for k, v := range ol {
 			oc := table.OverlayChar{X: k[0], Y: k[1], R: string(v), Layer: layer}
 			if lc != nil {
@@ -194,6 +213,7 @@ func (m *TableViewModel) syncOverlayToTable() {
 			if lg != nil {
 				oc.Group = lg[k]
 			}
+			oc.Locked = ll[k]
 			chars = append(chars, oc)
 		}
 	}
@@ -223,6 +243,12 @@ func (m *TableViewModel) loadOverlayFromTable() {
 				m.layerColors[oc.Layer] = lc
 			}
 			lc[pos] = oc.Color
+		}
+		if oc.Locked {
+			if m.layerLocks[oc.Layer] == nil {
+				m.layerLocks[oc.Layer] = make(map[[2]int]bool)
+			}
+			m.layerLocks[oc.Layer][pos] = true
 		}
 		if oc.Group != "" {
 			lg, ok := m.layerGroups[oc.Layer]
@@ -262,6 +288,12 @@ func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case clearStatusMsg:
 		m.statusMsg = ""
 		return m, nil
+	case tsSaveResultMsg:
+		if message.err != nil {
+			m.statusMsg = styles.Error.Render("Token save failed: " + message.err.Error())
+			return m, clearAfter(3 * time.Second)
+		}
+		return m, nil
 	case tvSaveResultMsg:
 		if message.err != nil {
 			m.statusMsg = styles.Error.Render("Save failed: " + message.err.Error())
@@ -276,7 +308,19 @@ func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = styles.Status.Render("Exported to " + message.path)
 		}
 		return m, clearAfter(3 * time.Second)
+	case hoverMsg:
+		if message.seq == m.hoverSeq && m.mode == modeNormal && m.menu == nil && m.tool == "" &&
+			!m.showQuit && m.deleteTokenIdx < 0 && m.removeFillGroup == "" && !m.confirmDeleteShape {
+			m.showTip(m.hoverX, m.hoverY)
+		}
+		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(message)
 	case tea.KeyPressMsg:
+		m.menu = nil
+		m.tip = nil
+		m.hoverSeq++
+		m.tool = ""
 		if m.showQuit {
 			return m.updateQuitDialog(message)
 		}
@@ -302,6 +346,8 @@ func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDrawLine(message)
 		case modeDrawBox:
 			return m.updateDrawBox(message)
+		case modeDrawCircle:
+			return m.updateDrawCircle(message)
 		case modeText:
 			return m.updateText(message)
 		case modeMove:
@@ -322,6 +368,7 @@ func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.String()
 	hasGrid := m.table.GridType != table.GridTypeNone
+	var cmd tea.Cmd
 
 	switch key {
 	case "q":
@@ -489,6 +536,7 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 					} else {
 						def.Properties = append(def.Properties, table.TokenProperty{Key: "Disabled", Value: "true"})
 					}
+					cmd = tsSaveLibCmd(m.tokenLib)
 				}
 			}
 		}
@@ -540,8 +588,12 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 			}
 		}
 
-	case "g":
+	case "x":
 		if hasGrid {
+			m.toggleLock(m.cursorX+m.panX, m.cursorY+m.panY)
+		}
+	case "g":
+		if hasGrid && !m.lockedAt(m.cursorX+m.panX, m.cursorY+m.panY) {
 			wx := m.cursorX + m.panX
 			wy := m.cursorY + m.panY
 			sel := m.floodSelectOverlay(wx, wy)
@@ -591,7 +643,7 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 	if hasGrid {
 		m.clampCursor()
 	}
-	return m, nil
+	return m, cmd
 }
 
 func (m TableViewModel) updateSaveName(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -621,15 +673,10 @@ func (m TableViewModel) updateMPending(message tea.KeyPressMsg) (tea.Model, tea.
 			wx := m.cursorX + m.panX
 			wy := m.cursorY + m.panY
 			ti := m.findTokenPlacementAt(wx, wy)
-			if ti >= 0 {
-				m.movingTokenIdx = ti
-				p := m.table.TokenPlacements[ti]
-				m.tokenMoveOriginX = p.X
-				m.tokenMoveOriginY = p.Y
-				m.tokenMoveOriginLayer = p.Layer
-				m.tokenMoveOffsetX = 0
-				m.tokenMoveOffsetY = 0
-				m.mode = modeMove
+			if m.lockedAt(wx, wy) {
+				m.mode = m.prevMode
+			} else if ti >= 0 {
+				m.beginTokenMove(ti)
 			} else {
 				sel := m.groupSelectOverlay(wx, wy)
 				if len(sel) > 0 {
@@ -739,6 +786,12 @@ func (m TableViewModel) updateDrawMenu(message tea.KeyPressMsg) (tea.Model, tea.
 		m.boxW = 1
 		m.boxH = 1
 		m.rebuildBoxPending()
+	case "c":
+		m.mode = modeDrawCircle
+		m.circleX = m.cursorX + m.panX
+		m.circleY = m.cursorY + m.panY
+		m.circleR = 0
+		m.rebuildCirclePending()
 	case "esc":
 		m.mode = modeNormal
 	}
@@ -1040,6 +1093,17 @@ func (m TableViewModel) updateMoveToken(message tea.KeyPressMsg) (tea.Model, tea
 	return m, nil
 }
 
+func (m *TableViewModel) beginTokenMove(ti int) {
+	m.movingTokenIdx = ti
+	p := m.table.TokenPlacements[ti]
+	m.tokenMoveOriginX = p.X
+	m.tokenMoveOriginY = p.Y
+	m.tokenMoveOriginLayer = p.Layer
+	m.tokenMoveOffsetX = 0
+	m.tokenMoveOffsetY = 0
+	m.mode = modeMove
+}
+
 // snapTokenToCell snaps the token to the center of the nearest grid cell.
 func (m *TableViewModel) snapTokenToCell() {
 	cols, rows := m.table.Width, m.table.Height
@@ -1314,6 +1378,40 @@ func (m *TableViewModel) depositLineChar(dx, dy int) {
 
 	m.cursorX = newSX
 	m.cursorY = newSY
+}
+
+func (m TableViewModel) updateDrawCircle(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch message.String() {
+	case "l", "right", "j", "down":
+		m.circleR += 2
+		m.rebuildCirclePending()
+	case "h", "left", "k", "up":
+		if m.circleR > 0 {
+			m.circleR -= 2
+			m.rebuildCirclePending()
+		}
+	case "ctrl+s":
+		m.commitPending()
+		m.mode = modeNormal
+	case "esc":
+		m.pending = nil
+		m.mode = modeNormal
+	}
+	return m, nil
+}
+
+// rebuildCirclePending plots an ellipse with half the vertical radius, since
+// terminal cells are about twice as tall as they are wide.
+func (m *TableViewModel) rebuildCirclePending() {
+	m.pending = make(map[[2]int]rune)
+	rx, ry := float64(m.circleR), float64(m.circleR)/2
+	steps := max(m.circleR*8, 1)
+	for i := range steps {
+		t := 2 * math.Pi * float64(i) / float64(steps)
+		x := m.circleX + int(math.Round(rx*math.Cos(t)))
+		y := m.circleY + int(math.Round(ry*math.Sin(t)))
+		m.pending[[2]int{x, y}] = '*'
+	}
 }
 
 func (m *TableViewModel) rebuildBoxPending() {
@@ -1625,6 +1723,7 @@ func (m TableViewModel) updateTokenMenu(message tea.KeyPressMsg) (tea.Model, tea
 				}
 			}
 			m.tokenConfirmDelete = false
+			return m, tsSaveLibCmd(m.tokenLib)
 		case "n", "esc":
 			m.tokenConfirmDelete = false
 		}
@@ -1732,7 +1831,7 @@ func (m TableViewModel) updateTokenMenuInput(message tea.KeyPressMsg) (tea.Model
 		if len(m.tokenMenuItems) > 0 {
 			m.tokenMenuCursor = len(m.tokenMenuItems) - 1
 		}
-		return m, nil
+		return m, tsSaveLibCmd(m.tokenLib)
 	case "esc":
 		m.tokenCreateMode = false
 		m.tokenFolderMode = false
@@ -1748,7 +1847,7 @@ func (m TableViewModel) updateTokenEdit(message tea.KeyPressMsg) (tea.Model, tea
 	if done {
 		m.tokenLib.Defs[m.tokenEditIdx].Properties = m.tokenEditor.Commit()
 		m.mode = modeNormal
-		return m, nil
+		return m, tsSaveLibCmd(m.tokenLib)
 	}
 	if cancelled {
 		m.mode = modeNormal
@@ -1886,7 +1985,13 @@ func (m TableViewModel) renderViewport(vpW, vpH int) string {
 
 		for i, r := range runes {
 			ch := string(r)
-			if sy == m.cursorY && i == m.cursorX {
+			if mr, in, sel := m.overlay().cell(i, sy+1); in {
+				if sel {
+					sb.WriteString(styles.CursorStyle.Render(string(mr)))
+				} else {
+					sb.WriteString(string(mr))
+				}
+			} else if sy == m.cursorY && i == m.cursorX {
 				sb.WriteString(styles.CursorStyle.Render(ch))
 			} else if tokenColor[i] == "disabled" {
 				sb.WriteString(styles.TokenDisabledStyle.Render(ch))
@@ -1990,7 +2095,7 @@ func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
 		def := m.tokenLib.FindTokenDef(p.TokenID)
 		if def != nil {
 			tooltipX := p.X + 6
-			for li, prop := range def.Properties {
+			for li, prop := range def.Visible() {
 				tooltipY := p.Y + li
 				if tooltipY != wy {
 					continue
@@ -2115,6 +2220,12 @@ func (m TableViewModel) topBar() string {
 			left = fmt.Sprintf("Pos: %d,%d", wx, wy)
 		}
 		left += fmt.Sprintf("  L:%d", m.currentLayer)
+		if m.lockedAt(wx, wy) {
+			left += "  " + styles.Highlight.Render("LOCKED")
+		}
+		if m.tool != "" {
+			left += "  " + styles.Highlight.Render("drag to draw, right-click to cancel")
+		}
 		if m.panMode {
 			left += "  " + styles.Highlight.Render("PAN")
 		}
@@ -2122,11 +2233,13 @@ func (m TableViewModel) topBar() string {
 		case modeMPending:
 			left += "  " + styles.Highlight.Render("m-")
 		case modeDrawMenu:
-			left += "  " + styles.Highlight.Render("DRAW: l=line b=box")
+			left += "  " + styles.Highlight.Render("DRAW: l=line b=box c=circle")
 		case modeDrawLine:
 			left += "  " + styles.Highlight.Render("LINE")
 		case modeDrawBox:
 			left += "  " + styles.Highlight.Render(fmt.Sprintf("BOX %dx%d", m.boxW, m.boxH))
+		case modeDrawCircle:
+			left += "  " + styles.Highlight.Render(fmt.Sprintf("CIRCLE r=%d", m.circleR))
 		case modeText:
 			left += "  " + styles.Highlight.Render("TEXT")
 		case modeMove:
@@ -2163,11 +2276,13 @@ func (m TableViewModel) topBar() string {
 			right = styles.Subtle.Render("+/-: layer  esc/l: back")
 		}
 	case modeDrawMenu:
-		right = styles.Subtle.Render("l: line  b: box  esc: cancel")
+		right = styles.Subtle.Render("l: line  b: box  c: circle  esc: cancel")
 	case modeDrawLine:
 		right = styles.Subtle.Render("hjkl: draw  ctrl+s: commit  esc: cancel")
 	case modeDrawBox:
 		right = styles.Subtle.Render("hjkl: resize  ctrl+s: commit  esc: cancel")
+	case modeDrawCircle:
+		right = styles.Subtle.Render("hjkl: radius  ctrl+s: commit  esc: cancel")
 	case modeText:
 		right = styles.Subtle.Render("type text  enter: newline  arrows: move  ctrl+s: commit  esc: cancel")
 	case modeMove:
@@ -2255,7 +2370,11 @@ func (m TableViewModel) viewTokenMenu() string {
 	var sb strings.Builder
 	sb.WriteString(m.topBar())
 	sb.WriteByte('\n')
-	sb.WriteString(fmt.Sprintf("\n  %s\n\n", styles.Title.Render("Token Library")))
+	bar := ""
+	if !m.tokenConfirmDelete && !m.tokenCreateMode && !m.tokenFolderMode {
+		bar = mouse.Bar(tokenBtns)
+	}
+	sb.WriteString(fmt.Sprintf("\n  %s\n%s\n", styles.Title.Render("Token Library"), bar))
 
 	if m.tokenConfirmDelete && m.tokenMenuCursor >= 0 && m.tokenMenuCursor < len(m.tokenMenuItems) {
 		item := m.tokenMenuItems[m.tokenMenuCursor]
