@@ -49,8 +49,9 @@ func Key(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
 		return tea.KeyPressMsg{Code: tea.KeyDown}
-	case "ctrl+s":
-		return tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
+	}
+	if k, ok := strings.CutPrefix(s, "ctrl+"); ok {
+		return tea.KeyPressMsg{Code: []rune(k)[0], Mod: tea.ModCtrl}
 	}
 	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 }

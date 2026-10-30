@@ -193,6 +193,8 @@ func (m TableViewModel) buildMenu() []menuItem {
 		menuItem{"Tokens", []string{"T"}},
 		menuItem{"Layer +", []string{"m", "l", "+", "esc"}},
 		menuItem{"Layer -", []string{"m", "l", "-", "esc"}},
+		menuItem{"Undo", []string{"U"}},
+		menuItem{"Redo", []string{"ctrl+r"}},
 		menuItem{"Save", []string{"s"}},
 		menuItem{"Export", []string{"S"}},
 		menuItem{"Quit", []string{"q"}},
@@ -338,10 +340,16 @@ func abs(n int) int {
 }
 
 func (m TableViewModel) overlay() *ctxMenu {
-	if m.menu != nil {
+	switch {
+	case m.menu != nil:
 		return m.menu
+	case m.tip != nil:
+		return m.tip
+	case m.inspectTokenIdx >= 0 && m.inspectTokenIdx < len(m.table.TokenPlacements):
+		p := m.table.TokenPlacements[m.inspectTokenIdx]
+		return m.tipFor(m.inspectTokenIdx, p.X+6-m.panX, p.Y-m.panY+1)
 	}
-	return m.tip
+	return nil
 }
 
 type hoverMsg struct{ seq int }
@@ -356,24 +364,25 @@ func (m *TableViewModel) hover(e mouse.Event) tea.Cmd {
 }
 
 func (m *TableViewModel) showTip(x, y int) {
-	pi := m.findTokenPlacementAt(x+m.panX, y-1+m.panY)
-	if pi < 0 {
-		return
+	if pi := m.findTokenPlacementAt(x+m.panX, y-1+m.panY); pi >= 0 {
+		m.tip = m.tipFor(pi, x+2, y+1)
 	}
+}
+
+func (m TableViewModel) tipFor(pi, x, y int) *ctxMenu {
 	def := m.tokenLib.FindTokenDef(m.table.TokenPlacements[pi].TokenID)
 	if def == nil {
-		return
-	}
-	props := def.Visible()
-	if len(props) == 0 {
-		return
+		return nil
 	}
 	c := &ctxMenu{idx: -1}
-	for _, p := range props {
+	for _, p := range def.Visible() {
 		c.items = append(c.items, menuItem{label: p.Key + ": " + p.Value})
 	}
+	if len(c.items) == 0 {
+		return nil
+	}
 	w, h := c.size()
-	c.x = max(min(x+2, m.width-w), 0)
-	c.y = max(min(y+1, m.height-h), 1)
-	m.tip = c
+	c.x = max(min(x, m.width-w), 0)
+	c.y = max(min(y, m.height-h), 1)
+	return c
 }

@@ -204,6 +204,8 @@ Token colors are **per-placement** — the same token definition can have differ
 
 | Key | Action |
 |-----|--------|
+| `U` | Undo (up to 100 steps; also in the right-click menu) |
+| `ctrl+r` | Redo |
 | `s` | Save the table (prompts for a name on first save) |
 | `S` | Export the grid as a plain text `.txt` file |
 | `q` | Quit |

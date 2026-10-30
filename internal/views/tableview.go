@@ -149,6 +149,8 @@ type TableViewModel struct {
 	menu         *ctxMenu
 	tip          *ctxMenu
 	hoverSeq     int
+	base         snap
+	undo, redo   []snap
 	hoverX       int
 	hoverY       int
 	drag         dragKind
@@ -179,6 +181,7 @@ func NewTableView(t table.Table, lib *table.TokenLibrary, w, h int) TableViewMod
 	m.expandedFolders = make(map[string]bool)
 	m.renderGrid()
 	m.loadOverlayFromTable()
+	m.base = m.snapshot()
 	return m
 }
 
@@ -280,6 +283,16 @@ func (m TableViewModel) Init() tea.Cmd {
 }
 
 func (m TableViewModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	mod, cmd := m.update(message)
+	tv := mod.(TableViewModel)
+	switch message.(type) {
+	case tea.KeyPressMsg, tea.MouseClickMsg, tea.MouseReleaseMsg:
+		tv.record()
+	}
+	return tv, cmd
+}
+
+func (m TableViewModel) update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = message.Width
@@ -588,6 +601,10 @@ func (m TableViewModel) updateNormal(message tea.KeyPressMsg) (tea.Model, tea.Cm
 			}
 		}
 
+	case "U":
+		cmd = m.step(&m.undo, &m.redo, "Undo")
+	case "ctrl+r":
+		cmd = m.step(&m.redo, &m.undo, "Redo")
 	case "x":
 		if hasGrid {
 			m.toggleLock(m.cursorX+m.panX, m.cursorY+m.panY)
@@ -2086,29 +2103,6 @@ func (m TableViewModel) worldLine(wy, w int) ([]rune, []string, []string) {
 				result[sx] = r
 				tokenColor[sx] = tc
 				overlayColor[sx] = ""
-			}
-		}
-	}
-
-	if m.inspectTokenIdx >= 0 && m.inspectTokenIdx < len(m.table.TokenPlacements) {
-		p := m.table.TokenPlacements[m.inspectTokenIdx]
-		def := m.tokenLib.FindTokenDef(p.TokenID)
-		if def != nil {
-			tooltipX := p.X + 6
-			for li, prop := range def.Visible() {
-				tooltipY := p.Y + li
-				if tooltipY != wy {
-					continue
-				}
-				line := []rune(prop.Key + ": " + prop.Value)
-				for ci, r := range line {
-					sx := tooltipX + ci - m.panX
-					if sx >= 0 && sx < w {
-						result[sx] = r
-						tokenColor[sx] = "214"
-						overlayColor[sx] = ""
-					}
-				}
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package views
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -171,5 +172,70 @@ func TestHiddenProps(t *testing.T) {
 	m = send(m, hoverMsg{seq: m.hoverSeq})
 	if m.tip == nil || len(m.tip.items) != 1 || m.tip.items[0].label != "Name: Bob" {
 		t.Fatalf("hidden property shown: %+v", m.tip)
+	}
+}
+
+func TestUndoRedo(t *testing.T) {
+	lib := &table.TokenLibrary{Defs: []table.TokenDef{{ID: "a", Properties: []table.TokenProperty{{Key: "Name", Value: "Gob"}}}}}
+	tb := table.Table{Name: "t", GridType: table.GridTypeGrid, Width: 5, Height: 5,
+		TokenPlacements: []table.TokenPlacement{{TokenID: "a", X: 10, Y: 5}}}
+	m := NewTableView(tb, lib, 120, 40)
+	key := func(k tea.KeyPressMsg) { m = send(m, k) }
+
+	m = send(m, click(11, 7, tea.MouseLeft),
+		tea.MouseMotionMsg{X: 31, Y: 7, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 31, Y: 7, Button: tea.MouseLeft})
+	moved := m.table.TokenPlacements[0].X
+	if moved == 10 || len(m.undo) != 1 {
+		t.Fatalf("move not recorded: x=%d undo=%d", moved, len(m.undo))
+	}
+
+	m.tool = "b"
+	m = send(m, click(60, 30, tea.MouseLeft), tea.MouseMotionMsg{X: 66, Y: 33, Button: tea.MouseLeft},
+		tea.MouseReleaseMsg{X: 66, Y: 33, Button: tea.MouseLeft})
+	if len(m.activeOverlay()) == 0 || len(m.undo) != 2 {
+		t.Fatalf("box not recorded: undo=%d", len(m.undo))
+	}
+
+	key(tea.KeyPressMsg{Code: 'U', Text: "U"})
+	if len(m.activeOverlay()) != 0 || m.table.TokenPlacements[0].X != moved {
+		t.Fatal("undo did not remove box")
+	}
+	key(tea.KeyPressMsg{Code: 'U', Text: "U"})
+	if m.table.TokenPlacements[0].X != 10 {
+		t.Fatal("undo did not restore token")
+	}
+	key(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	key(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if len(m.activeOverlay()) == 0 || m.table.TokenPlacements[0].X != moved || len(m.redo) != 0 {
+		t.Fatal("redo did not reapply")
+	}
+
+	for i := 0; i < 120; i++ {
+		m.table.TokenPlacements[0].Facing = i + 1
+		m.record()
+	}
+	if len(m.undo) != maxUndo {
+		t.Fatalf("undo not capped: %d", len(m.undo))
+	}
+}
+
+func TestInspectTip(t *testing.T) {
+	lib := &table.TokenLibrary{Defs: []table.TokenDef{{ID: "a", Properties: []table.TokenProperty{{Key: "Name", Value: "Bob"}, {Key: "H-Secret", Value: "x"}}}}}
+	tb := table.Table{Name: "t", GridType: table.GridTypeGrid, Width: 5, Height: 5,
+		TokenPlacements: []table.TokenPlacement{{TokenID: "a", X: 10, Y: 5}}}
+	m := NewTableView(tb, lib, 120, 40)
+	m = send(m, click(11, 7, tea.MouseLeft), tea.MouseReleaseMsg{X: 11, Y: 7, Button: tea.MouseLeft},
+		tea.KeyPressMsg{Code: 'i', Text: "i"})
+	c := m.overlay()
+	if c == nil || len(c.items) != 1 || c.items[0].label != "Name: Bob" {
+		t.Fatalf("inspect tooltip wrong: %+v", c)
+	}
+	if v := m.View().Content; !strings.Contains(v, "┌") || !strings.Contains(v, "Name: Bob") {
+		t.Fatal("inspect tooltip not rendered")
+	}
+	m = send(m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if m.overlay() != nil {
+		t.Fatal("second i did not close tooltip")
 	}
 }
